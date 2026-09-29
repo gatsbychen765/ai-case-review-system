@@ -1,0 +1,7 @@
+name = "ecnu-ai-case-review-api"
+main = "worker/index.js"
+compatibility_date = "2026-09-29"
+workers_dev = true
+
+[vars]
+CORS_ALLOWED_ORIGIN = "https://gatsbychen765.github.io"

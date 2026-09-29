@@ -1,0 +1,51 @@
+name: Publish review site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Install dependencies
+        run: npm ci
+      - name: Build site
+        env:
+          VITE_BASE_PATH: /ai-case-review-system/
+          VITE_REVIEW_API_BASE_URL: ${{ vars.REVIEW_API_BASE_URL }}
+        run: |
+          if [ -z "$VITE_REVIEW_API_BASE_URL" ]; then
+            echo "Set the GitHub Actions variable REVIEW_API_BASE_URL to the deployed Worker URL before publishing."
+            exit 1
+          fi
+          npm run build
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/client
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
