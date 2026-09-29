@@ -41,7 +41,7 @@ jobs:
             echo "Set the GitHub Actions variable REVIEW_API_BASE_URL to the deployed Worker URL before publishing."
             exit 1
           fi
-          npm run build
+          npm run build:pages
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

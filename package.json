@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "build:pages": "vite build",
     "preview": "vite preview",
     "prepare:pages": "node scripts/prepare-github-release.mjs",
     "deploy:api": "npx wrangler@4 deploy --config wrangler.toml",
