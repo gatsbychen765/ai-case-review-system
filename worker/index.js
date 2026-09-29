@@ -93,10 +93,12 @@ async function handleRequest(request, env) {
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({ model: config.model, messages: [{ role: "system", content: "你是教育案例评审辅助员。按量规保持审慎、略偏严格：高分必须有充分、具体、可核对的材料支撑；仅有概括性陈述、缺少实施细节或成效数据时，应相应扣分，不因表述流畅或技术新颖而加分。逐项检查所有要点，证据不足不得推定达成。区分未提供与不存在，不编造证据；只提供初审建议，最终判断由人工评审员作出。" }, { role: "user", content: prompt }], stream: false, max_tokens: 4096 }),
           signal: AbortSignal.timeout(150_000),
-          redirect: "error",
+          redirect: "manual",
         });
         if (!upstream.ok) {
-          const message = upstream.status === 401 || upstream.status === 403 ? "模型认证未通过或当前 Key 没有该模型权限，请检查模型服务商的配置。" : upstream.status === 429 ? "模型额度或调用频率已达限制，请检查模型服务商账户。" : `模型服务暂未完成评分（HTTP ${upstream.status}），请稍后重试。`;
+          const location = upstream.status >= 300 && upstream.status < 400 ? upstream.headers.get("location") : null;
+          const redirectOrigin = location ? (() => { try { return new URL(location, config.endpoint).origin; } catch { return "未知地址"; } })() : "";
+          const message = redirectOrigin ? `模型接口返回重定向（HTTP ${upstream.status}，目标：${redirectOrigin}）。请检查 API 地址并填写最终接口地址。` : upstream.status === 401 || upstream.status === 403 ? "模型认证未通过或当前 Key 没有该模型权限，请检查模型服务商的配置。" : upstream.status === 429 ? "模型额度或调用频率已达限制，请检查模型服务商账户。" : `模型服务暂未完成评分（HTTP ${upstream.status}），请稍后重试。`;
           return Response.json({ error: message }, { status: 502, headers: { "Cache-Control": "no-store" } });
         }
         const data = await upstream.json();
