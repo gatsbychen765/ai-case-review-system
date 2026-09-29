@@ -299,6 +299,8 @@ function App() {
     if (!window.confirm(`即将依次评审 ${pending.length} 份案例。每份案例都会发送正文、类别和评分要点至你配置的模型服务，并消耗你的模型额度。是否继续？`)) return;
     setBatchBusy(true);
     let finished = 0;
+    let succeeded = 0;
+    let failed = 0;
     for (const item of pending) {
       const batchRubric = RUBRICS[item.category];
       setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "正在评审", error: "" } : entry));
@@ -311,12 +313,14 @@ function App() {
         const results = batchRubric.rows.map((row) => ({ ...byName[row.name], max: row.weight }));
         const result = { ...data, results, total: results.reduce((sum, row) => sum + (Number(row.score) || 0), 0) };
         setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "待人工复核", result } : entry));
+        succeeded += 1;
       } catch (error) {
+        failed += 1;
         setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "评审失败", error: error.message || "评分失败" } : entry));
       }
       finished += 1;
     }
-    setBatchProgress(`本批评审完成：${finished} 份；请人工复核分数、理由与引用。`); setBatchBusy(false);
+    setBatchProgress(`本批评审结束：成功 ${succeeded} 份，失败 ${failed} 份。请人工复核成功案例的分数、理由与引用。`); setBatchBusy(false);
   }
 
   function exportBatchExcel() {
