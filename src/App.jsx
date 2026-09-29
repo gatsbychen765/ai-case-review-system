@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { renderAsync } from "docx-preview";
 
 const REVIEW_API_BASE_URL = (import.meta.env.VITE_REVIEW_API_BASE_URL || "").replace(/\/+$/, "");
 
@@ -96,6 +97,41 @@ async function readDocx(file) {
   throw new Error("未在文件中找到正文内容。");
 }
 
+function OriginalWordPreview({ file }) {
+  const previewRef = useRef(null);
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    const target = previewRef.current;
+    if (!target || !file) return undefined;
+    let cancelled = false;
+    target.replaceChildren();
+    setStatus("正在生成 Word 页面预览…");
+    renderAsync(file, target, target, {
+      className: "docx",
+      inWrapper: true,
+      breakPages: true,
+      renderHeaders: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderEndnotes: true,
+      renderAltChunks: false,
+      useBase64URL: true,
+    }).then(() => {
+      if (!cancelled) setStatus("");
+    }).catch(() => {
+      if (!cancelled) setStatus("原始 Word 预览生成失败，请下载文档后使用 Word 查看。文字解析结果仍可正常使用。");
+    });
+    return () => {
+      cancelled = true;
+      target.replaceChildren();
+    };
+  }, [file]);
+
+  if (!file) return <div className="word-preview-empty">示例文档没有对应的原始 Word 文件。上传 DOCX 后可在此查看原始版式。</div>;
+  return <div className="word-preview-scroll"><div className="word-preview-status" role="status">{status}</div><div ref={previewRef} className="word-preview-pages" /></div>;
+}
+
 function makeEvidence(text, row, demo) {
   if (!text) return "上传案例文档后，可在正文中核对相关依据。";
   const paragraphs = text.split(/\n+/).map((item) => item.trim()).filter((item) => item && !/^(一、|二、|三、|四、|五、|\d+[.、])/.test(item));
@@ -174,7 +210,7 @@ function App() {
     setBusy(true); setNotice("");
     try {
       const text = await readDocx(file);
-      setDoc({ title: file.name.replace(/\.docx$/i, ""), fileName: file.name, text, demo: false });
+      setDoc({ title: file.name.replace(/\.docx$/i, ""), fileName: file.name, text, sourceFile: file, demo: false });
       setDocumentView("document");
       setScores(Object.fromEntries(RUBRICS[category].rows.map((row) => [row.name, ""])));
       setAiReview(null);
@@ -247,7 +283,7 @@ function App() {
     setBatchBusy(true); setBatchProgress(`正在读取 ${files.length} 份 DOCX 文档…`);
     const added = [];
     for (const file of files) {
-      const item = { id: crypto.randomUUID(), name: file.name, category: 1, text: "", status: "读取中", result: null, error: "" };
+      const item = { id: crypto.randomUUID(), name: file.name, category: 1, text: "", sourceFile: file, status: "读取中", result: null, error: "" };
       try { item.text = await readDocx(file); item.status = "待评审"; }
       catch (error) { item.status = "读取失败"; item.error = error.message || "文档读取失败"; }
       added.push(item);
@@ -340,7 +376,7 @@ function App() {
         {batchProgress && <div className="notice batch-notice" role="status">{batchProgress}</div>}
         <section className="batch-panel panel">
           <div className="batch-toolbar"><div><span className="panel-kicker">案例队列</span><h2>本批案例 <span className="count">{batchCases.length} 份</span></h2><p>每份案例可单独选择类别；评审按队列逐篇发送。</p></div><div className="heading-actions"><button className="button quiet" disabled={!batchCases.length || batchBusy} onClick={() => setBatchCases([])}>清空列表</button><button className="button quiet" disabled={!batchCases.some((item) => item.result)} onClick={exportBatchExcel}>导出 Excel</button><button className="button ai-button" disabled={batchBusy || !batchCases.some((item) => item.text && !item.result)} onClick={reviewBatch}>{batchBusy ? "正在批量评审…" : "开始批量评审"}</button></div></div>
-          {!batchCases.length ? <div className="empty-state"><h2>上传 DOCX 案例文档</h2><p>支持一次选择多份 Word 文档。正文将用于评分，不会保存在服务端。</p><button className="button primary" onClick={() => batchFileInput.current?.click()}>选择多个文件</button></div> : <div className="batch-list"><div className="batch-row batch-header"><span>案例文件</span><span>案例类别</span><span>状态</span><span>建议总分</span><span>操作</span></div>{batchCases.map((item) => <article className="batch-row" key={item.id}><div className="batch-name"><strong title={item.name}>{item.name}</strong>{item.error && <small>{item.error}</small>}</div><select aria-label={`${item.name}案例类别`} value={item.category} disabled={batchBusy || Boolean(item.result)} onChange={(event) => setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, category: Number(event.target.value) } : entry))}>{Object.entries(RUBRICS).map(([id, itemRubric]) => <option key={id} value={id}>{id}. {itemRubric.name}</option>)}</select><span className={`batch-status ${item.result ? "done" : item.status === "评审失败" || item.status === "读取失败" ? "error" : ""}`}>{item.status}</span><strong className="batch-score">{item.result ? `${item.result.total} / 100` : "—"}</strong><div className="batch-actions">{item.result && <button className="text-button" onClick={() => { setCategory(item.category); setDoc({ title: item.name.replace(/\.docx$/i, ""), fileName: item.name, text: item.text, demo: false }); setScores(Object.fromEntries(item.result.results.map((row) => [row.indicator, row.score]))); setAiReview({ ...item.result, byName: Object.fromEntries(item.result.results.map((row) => [row.indicator, row])), reviewedAt: "批量评审结果" }); setComment(item.result.overallComment || ""); setView("review"); }}>查看详情</button>}<button className="text-button remove-case" disabled={batchBusy} onClick={() => setBatchCases((current) => current.filter((entry) => entry.id !== item.id))}>移除</button></div></article>)}</div>}
+          {!batchCases.length ? <div className="empty-state"><h2>上传 DOCX 案例文档</h2><p>支持一次选择多份 Word 文档。正文将用于评分，不会保存在服务端。</p><button className="button primary" onClick={() => batchFileInput.current?.click()}>选择多个文件</button></div> : <div className="batch-list"><div className="batch-row batch-header"><span>案例文件</span><span>案例类别</span><span>状态</span><span>建议总分</span><span>操作</span></div>{batchCases.map((item) => <article className="batch-row" key={item.id}><div className="batch-name"><strong title={item.name}>{item.name}</strong>{item.error && <small>{item.error}</small>}</div><select aria-label={`${item.name}案例类别`} value={item.category} disabled={batchBusy || Boolean(item.result)} onChange={(event) => setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, category: Number(event.target.value) } : entry))}>{Object.entries(RUBRICS).map(([id, itemRubric]) => <option key={id} value={id}>{id}. {itemRubric.name}</option>)}</select><span className={`batch-status ${item.result ? "done" : item.status === "评审失败" || item.status === "读取失败" ? "error" : ""}`}>{item.status}</span><strong className="batch-score">{item.result ? `${item.result.total} / 100` : "—"}</strong><div className="batch-actions">{item.result && <button className="text-button" onClick={() => { setCategory(item.category); setDoc({ title: item.name.replace(/\.docx$/i, ""), fileName: item.name, text: item.text, sourceFile: item.sourceFile, demo: false }); setScores(Object.fromEntries(item.result.results.map((row) => [row.indicator, row.score]))); setAiReview({ ...item.result, byName: Object.fromEntries(item.result.results.map((row) => [row.indicator, row])), reviewedAt: "批量评审结果" }); setComment(item.result.overallComment || ""); setView("review"); }}>查看详情</button>}<button className="text-button remove-case" disabled={batchBusy} onClick={() => setBatchCases((current) => current.filter((entry) => entry.id !== item.id))}>移除</button></div></article>)}</div>}
           {batchCases.some((item) => item.result) && <p className="batch-footnote">Excel 包含评审汇总与逐项评分两张表；AI分数、理由和引文均为初审建议，需人工复核。</p>}
         </section>
       </main>}
@@ -354,14 +390,14 @@ function App() {
         <div className="workspace">
           <section className="document-panel panel">
             <div className="panel-head doc-head"><div><span className="panel-kicker">案例材料</span><h2 title={doc.title}>{doc.title}</h2><p className="file-meta">{doc.fileName} <span>·</span> {doc.demo ? "示例内容，非真实参赛案例" : `${doc.text.length.toLocaleString()} 字符已提取`}</p></div><button className="text-button" onClick={() => fileInput.current?.click()}>上传 DOCX</button></div>
-            <div className="doc-toolbar"><div className="doc-tabs"><button className={documentView === "document" ? "selected" : ""} onClick={() => setDocumentView("document")}>文档内容</button><button className={documentView === "evidence" ? "selected" : ""} onClick={() => setDocumentView("evidence")}>证据定位</button></div><span className="doc-page">{documentView === "document" ? "正文文字视图" : `${rubric.rows.length} 项评审依据`}</span></div>
-            {documentView === "document" ? <article className="document-body">
+            <div className="doc-toolbar"><div className="doc-tabs"><button className={documentView === "document" ? "selected" : ""} onClick={() => setDocumentView("document")}>文字解析</button><button className={documentView === "word" ? "selected" : ""} onClick={() => setDocumentView("word")}>原始 Word</button><button className={documentView === "evidence" ? "selected" : ""} onClick={() => setDocumentView("evidence")}>证据定位</button></div><span className="doc-page">{documentView === "document" ? "正文文字视图" : documentView === "word" ? "原始页面预览" : `${rubric.rows.length} 项评审依据`}</span></div>
+            {documentView === "word" ? <OriginalWordPreview file={doc.sourceFile} /> : documentView === "document" ? <article className="document-body">
               {doc.text.split(/\n+/).filter(Boolean).map((paragraph, index) => {
                 const heading = /^(一、|二、|三、|四、|五、|\d+[.、])/.test(paragraph);
                 return heading ? <h3 key={index}>{paragraph}</h3> : <p key={index}>{paragraph}</p>;
               })}
             </article> : <div className="evidence-list">{rubric.rows.map((row, index) => <article className="evidence-item" key={row.name}><div><span>0{index + 1} · {row.name}</span><p>{makeEvidence(doc.text, row, doc.demo)}</p></div><small>{doc.demo ? "示例文本定位" : "关键词辅助定位"}</small></article>)}</div>}
-            <div className="doc-foot"><span>DOCX 正文解析</span><span>图片、视频与版式内容需人工检查</span></div>
+            <div className="doc-foot"><span>{documentView === "word" ? "原始 DOCX 页面预览" : "DOCX 正文解析"}</span><span>{documentView === "word" ? "仅在当前浏览器渲染，预览版式可能与 Word 略有差异" : "图片、视频与版式内容需人工检查"}</span></div>
           </section>
 
           <section className="review-panel panel">

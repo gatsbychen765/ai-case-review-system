@@ -71,6 +71,12 @@ button { cursor: pointer; }
 .document-body h3 { font-family: "Noto Serif SC", "Songti SC", serif; margin: 23px 0 9px; font-size: 16px; font-weight: 600; letter-spacing: .02em; color: #373336; }
 .document-body h3:first-child { margin-top: 2px; }
 .document-body p { margin: 0 0 13px; font-family: "Noto Serif SC", "Songti SC", serif; font-size: 13px; color: #615c5d; line-height: 2.05; text-align: justify; white-space: pre-wrap; }
+.word-preview-scroll { flex: 1; min-height: 540px; max-height: 660px; overflow: auto; padding: 14px; background: #f0edeb; scrollbar-color: #d7cccc transparent; scrollbar-width: thin; }
+.word-preview-status { margin: 0 auto 10px; max-width: 780px; color: #8e777b; font-size: 11px; text-align: center; }
+.word-preview-status:empty { display: none; }
+.word-preview-pages .docx-wrapper { padding: 0; background: transparent; }
+.word-preview-pages .docx { margin: 0 auto 14px; box-shadow: 0 2px 12px rgba(53,43,39,.14); }
+.word-preview-empty { flex: 1; min-height: 540px; display: grid; place-items: center; padding: 32px; color: #898184; background: #f8f6f4; font-size: 12px; text-align: center; line-height: 1.8; }
 .evidence-list { flex: 1; min-height: 540px; max-height: 660px; overflow: auto; padding: 7px 20px; scrollbar-color: #d7cccc transparent; scrollbar-width: thin; }
 .evidence-item { display: flex; align-items: start; justify-content: space-between; gap: 18px; padding: 16px 2px; border-bottom: 1px solid #eeeae8; }
 .evidence-item span { color: #8e5b64; font-size: 10px; font-weight: 600; }
@@ -236,6 +242,7 @@ button { cursor: pointer; }
   .workspace { grid-template-columns: 1fr; }
   .document-panel { min-height: auto; }
   .document-body { min-height: 260px; max-height: 390px; }
+  .word-preview-scroll, .word-preview-empty { min-height: 260px; max-height: 390px; }
   .evidence-list { min-height: 260px; max-height: 390px; }
 }
 @media (max-width: 600px) {
