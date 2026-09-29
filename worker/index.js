@@ -74,10 +74,12 @@ async function handleRequest(request, env) {
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({ model: config.model, messages: [{ role: "user", content: "请仅回复：连接成功" }], stream: false, max_tokens: 8 }),
             signal: AbortSignal.timeout(30_000),
-            redirect: "error",
+            redirect: "manual",
           });
           if (!upstream.ok) {
-            const message = upstream.status === 401 || upstream.status === 403 ? "认证失败，或此 Key 没有该模型的调用权限。" : upstream.status === 429 ? "请求频率或账户额度已达限制，请检查模型服务商账户。" : `连接测试失败（HTTP ${upstream.status}）。`;
+            const location = upstream.status >= 300 && upstream.status < 400 ? upstream.headers.get("location") : null;
+            const redirectOrigin = location ? (() => { try { return new URL(location, config.endpoint).origin; } catch { return "未知地址"; } })() : "";
+            const message = redirectOrigin ? `接口返回重定向（HTTP ${upstream.status}，目标：${redirectOrigin}）。请填写最终接口地址。` : upstream.status === 401 || upstream.status === 403 ? "认证失败，或此 Key 没有该模型的调用权限。" : upstream.status === 429 ? "请求频率或账户额度已达限制，请检查模型服务商账户。" : `连接测试失败（HTTP ${upstream.status}）。`;
             return Response.json({ error: message }, { status: upstream.status === 401 || upstream.status === 403 ? 401 : upstream.status === 429 ? 429 : 502, headers: { "Cache-Control": "no-store" } });
           }
           return Response.json({ connected: true, model: config.model }, { headers: { "Cache-Control": "no-store" } });
@@ -112,7 +114,13 @@ async function handleRequest(request, env) {
         return Response.json({ model: config.model, results: normalized, overallComment: String(result.overallComment || "") }, { headers: { "Cache-Control": "no-store" } });
       } catch (error) {
         const timeout = error.name === "AbortError" || error.name === "TimeoutError";
-        return Response.json({ error: timeout ? "模型响应超时，请稍后重试。" : error instanceof SyntaxError ? "请求或模型返回格式无效。" : "评分请求失败，请检查配置和网络后重试。" }, { status: timeout ? 504 : 502, headers: { "Cache-Control": "no-store" } });
+        const causeCode = typeof error?.cause?.code === "string" && /^[A-Z0-9_]{1,64}$/.test(error.cause.code) ? error.cause.code : "";
+        const errorType = causeCode || String(error?.name || "未知错误").slice(0, 48);
+        const message = timeout ? "模型响应超时，请稍后重试。"
+          : error instanceof SyntaxError ? "请求或模型返回格式无效。"
+            : url.pathname === "/api/test-key" ? `连接模型服务失败（${errorType}）。请检查 API Key 格式和上游网络后重试。`
+              : `评分请求失败（${errorType}），请检查配置和网络后重试。`;
+        return Response.json({ error: message }, { status: timeout ? 504 : 502, headers: { "Cache-Control": "no-store" } });
       }
     }
 
