@@ -2,6 +2,27 @@ export class ScoreApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
+function parseModelJson(content) {
+  const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/```(?:json)?/gi, "").trim();
+  try { return JSON.parse(cleaned); } catch {}
+  const start = cleaned.indexOf("{");
+  if (start < 0) throw new SyntaxError("JSON object not found");
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let i = start; i < cleaned.length; i += 1) {
+    const char = cleaned[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}" && --depth === 0) return JSON.parse(cleaned.slice(start, i + 1));
+  }
+  throw new SyntaxError("Incomplete JSON object");
+}
+
 function validateApiConfig({ apiKey, apiUrl, model }) {
   if (typeof apiKey !== "string" || !apiKey.trim() || apiKey.length > 512) throw new ScoreApiError(400, "请填写有效格式的 API Key。");
   if (typeof model !== "string" || !model.trim() || model.length > 160) throw new ScoreApiError(400, "请填写有效的模型名称。");
@@ -50,6 +71,7 @@ export async function scoreCase({ apiKey, apiUrl, model, text, category, rubric 
       body: JSON.stringify({
         model: model.trim(),
         messages: [{ role: "system", content: "你是教育案例评审辅助员。按量规保持审慎、略偏严格：高分必须有充分、具体、可核对的材料支撑；仅有概括性陈述、缺少实施细节或成效数据时，应相应扣分，不因表述流畅或技术新颖而加分。逐项检查所有要点，证据不足不得推定达成。区分未提供与不存在，不编造证据；只提供初审建议，最终判断由人工评审员作出。" }, { role: "user", content: prompt }],
+        response_format: { type: "json_object" },
         stream: false,
         max_tokens: 4096,
       }),
@@ -68,13 +90,15 @@ export async function scoreCase({ apiKey, apiUrl, model, text, category, rubric 
   }
 
   let data;
-  try { data = await response.json(); } catch { throw new ScoreApiError(502, "模型返回格式无效，请稍后重试。"); }
-  const content = data?.choices?.[0]?.message?.content;
+  try { data = await response.json(); } catch { throw new ScoreApiError(502, "模型服务返回格式无效，无法读取评审结果。"); }
+  const choice = data?.choices?.[0];
+  if (choice?.finish_reason === "length") throw new ScoreApiError(502, "模型输出达到长度上限，评分结果不完整。请缩短案例正文后重试。");
+  const content = choice?.message?.content;
   if (typeof content !== "string") throw new ScoreApiError(502, "模型返回格式不完整，请稍后重试。");
 
   let result;
-  try { result = JSON.parse(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim()); }
-  catch { throw new ScoreApiError(502, "模型未返回可读取的评分 JSON，请重试。"); }
+  try { result = parseModelJson(content); }
+  catch { throw new ScoreApiError(502, "模型已响应，但评分内容不是完整 JSON。请重试一次；若仍失败，请缩短案例正文。"); }
   if (!Array.isArray(result.results) || result.results.length !== rubric.length) throw new ScoreApiError(502, "模型未按全部评分指标返回结果，请重试。");
 
   const expected = new Map(rubric.map((row) => [String(row.name), Number(row.weight)]));

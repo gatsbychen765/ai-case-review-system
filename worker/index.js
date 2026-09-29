@@ -43,6 +43,27 @@ function addApiCors(response, request, env) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+function parseModelJson(content) {
+  const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/```(?:json)?/gi, "").trim();
+  try { return JSON.parse(cleaned); } catch {}
+  const start = cleaned.indexOf("{");
+  if (start < 0) throw new SyntaxError("JSON object not found");
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let i = start; i < cleaned.length; i += 1) {
+    const char = cleaned[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}" && --depth === 0) return JSON.parse(cleaned.slice(start, i + 1));
+  }
+  throw new SyntaxError("Incomplete JSON object");
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -64,7 +85,10 @@ async function handleRequest(request, env) {
     if ((url.pathname === "/api/score" || url.pathname === "/api/test-key") && request.method === "POST") {
       try {
         if (Number(request.headers.get("content-length") || 0) > 220_000) return Response.json({ error: "请求正文过大。" }, { status: 413 });
-        const { text, category, rubric, apiUrl, model } = await request.json();
+        let payload;
+        try { payload = await request.json(); }
+        catch { return Response.json({ error: "评审请求数据格式无效，请刷新页面后重试。" }, { status: 400 }); }
+        const { text, category, rubric, apiUrl, model } = payload;
         const apiKey = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") || "")?.[1] || "";
         const config = getValidatedConfig(apiKey, apiUrl, model);
         if (config.error) return Response.json({ error: config.error }, { status: 400 });
@@ -91,7 +115,7 @@ async function handleRequest(request, env) {
         const upstream = await fetch(config.endpoint, {
           method: "POST",
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: config.model, messages: [{ role: "system", content: "你是教育案例评审辅助员。按量规保持审慎、略偏严格：高分必须有充分、具体、可核对的材料支撑；仅有概括性陈述、缺少实施细节或成效数据时，应相应扣分，不因表述流畅或技术新颖而加分。逐项检查所有要点，证据不足不得推定达成。区分未提供与不存在，不编造证据；只提供初审建议，最终判断由人工评审员作出。" }, { role: "user", content: prompt }], stream: false, max_tokens: 4096 }),
+          body: JSON.stringify({ model: config.model, messages: [{ role: "system", content: "你是教育案例评审辅助员。按量规保持审慎、略偏严格：高分必须有充分、具体、可核对的材料支撑；仅有概括性陈述、缺少实施细节或成效数据时，应相应扣分，不因表述流畅或技术新颖而加分。逐项检查所有要点，证据不足不得推定达成。区分未提供与不存在，不编造证据；只提供初审建议，最终判断由人工评审员作出。" }, { role: "user", content: prompt }], response_format: { type: "json_object" }, stream: false, max_tokens: 4096 }),
           signal: AbortSignal.timeout(150_000),
           redirect: "manual",
         });
@@ -101,10 +125,16 @@ async function handleRequest(request, env) {
           const message = redirectOrigin ? `模型接口返回重定向（HTTP ${upstream.status}，目标：${redirectOrigin}）。请检查 API 地址并填写最终接口地址。` : upstream.status === 401 || upstream.status === 403 ? "模型认证未通过或当前 Key 没有该模型权限，请检查模型服务商的配置。" : upstream.status === 429 ? "模型额度或调用频率已达限制，请检查模型服务商账户。" : `模型服务暂未完成评分（HTTP ${upstream.status}），请稍后重试。`;
           return Response.json({ error: message }, { status: 502, headers: { "Cache-Control": "no-store" } });
         }
-        const data = await upstream.json();
-        const content = data?.choices?.[0]?.message?.content;
+        let data;
+        try { data = await upstream.json(); }
+        catch { return Response.json({ error: "模型服务返回格式无效，无法读取评审结果。" }, { status: 502 }); }
+        const choice = data?.choices?.[0];
+        if (choice?.finish_reason === "length") return Response.json({ error: "模型输出达到长度上限，评分结果不完整。请缩短案例正文后重试。" }, { status: 502 });
+        const content = choice?.message?.content;
         if (typeof content !== "string") return Response.json({ error: "模型返回格式不完整，请稍后重试。" }, { status: 502 });
-        const result = JSON.parse(content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim());
+        let result;
+        try { result = parseModelJson(content); }
+        catch { return Response.json({ error: "模型已响应，但评分内容不是完整 JSON。请重试一次；若仍失败，请缩短案例正文。" }, { status: 502 }); }
         if (!Array.isArray(result.results) || result.results.length !== rubric.length) return Response.json({ error: "模型未按全部评分指标返回结果，请重试。" }, { status: 502 });
         const expected = new Map(rubric.map((row) => [String(row.name), Number(row.weight)]));
         const normalized = result.results.map((item) => {
