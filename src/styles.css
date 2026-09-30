@@ -190,6 +190,10 @@ button { cursor: pointer; }
 .key-cost-note { margin-bottom: 4px; color: #9b9294 !important; font-size: 10px !important; }
 .key-actions { flex-wrap: wrap; }
 .batch-view { padding-bottom: 28px; }
+.batch-category-setting { margin: 0 clamp(20px, 3.2vw, 52px) 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #625b5d; font-size: 11px; }
+.batch-category-setting label { font-weight: 600; }
+.batch-category-setting select { max-width: 260px; height: 34px; border: 1px solid #e6dfdc; border-radius: 6px; background: white; padding: 0 8px; color: #625b5d; }
+.batch-category-setting span { color: #92898b; }
 .batch-panel { margin: 0 clamp(20px, 3.2vw, 52px); overflow: hidden; }
 .batch-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 20px 22px; border-bottom: 1px solid #eeeae8; background: rgba(251,249,247,.72); }
 .batch-toolbar h2 { margin: 5px 0 4px; color: #373336; font: 600 18px "Noto Serif SC", "Songti SC", serif; }
