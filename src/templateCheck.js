@@ -11,7 +11,7 @@ export function suggestCategory(text) {
   if (first.includes(TEMPLATES[3].title)) return 3;
   if (first.includes(TEMPLATES[4].title)) return 4;
   if (first.includes(TEMPLATES[1].title)) {
-    const selectedTwo = /[√✓✔☑●■]s*类别二/.test(text.slice(0, 1200));
+    const selectedTwo = /[√✓✔☑●■]\s*类别二/.test(text.slice(0, 1200));
     return selectedTwo ? 2 : 1;
   }
   return 1;
