@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
+import { checkTemplate, suggestCategory } from "./templateCheck.js";
 
 const REVIEW_API_BASE_URL = (import.meta.env.VITE_REVIEW_API_BASE_URL || "").replace(/\/+$/, "");
 
@@ -187,6 +188,7 @@ function App() {
   const [history, setHistory] = useState([]);
   const [consentOpen, setConsentOpen] = useState(false);
   const [aiReview, setAiReview] = useState(null);
+  const templateResult = useMemo(() => doc.demo ? null : checkTemplate(doc.text, category), [doc, category]);
   const [apiKey, setApiKey] = useState(() => sessionStorage.getItem("review-api-key") || "");
   const [keyDraft, setKeyDraft] = useState(() => sessionStorage.getItem("review-api-key") || "");
   const [apiUrl, setApiUrl] = useState(() => sessionStorage.getItem("review-api-url") || "");
@@ -203,6 +205,8 @@ function App() {
   const rubric = RUBRICS[category];
   const assigned = rubric.rows.filter((row) => scores[row.name] !== "" && scores[row.name] != null).length;
   const total = useMemo(() => rubric.rows.reduce((sum, row) => sum + (Number(scores[row.name]) || 0), 0), [rubric, scores]);
+  const screenedCount = batchCases.filter((item) => item.result?.total < 60 || (!item.result && item.template?.status === "不符合模板" && !item.templateOverride)).length;
+  const scoredCount = batchCases.filter((item) => item.result).length;
 
   async function loadFile(file) {
     if (!file) return;
@@ -210,12 +214,14 @@ function App() {
     setBusy(true); setNotice("");
     try {
       const text = await readDocx(file);
+      const detectedCategory = suggestCategory(text);
+      setCategory(detectedCategory);
       setDoc({ title: file.name.replace(/\.docx$/i, ""), fileName: file.name, text, sourceFile: file, demo: false });
       setDocumentView("document");
-      setScores(Object.fromEntries(RUBRICS[category].rows.map((row) => [row.name, ""])));
+      setScores(Object.fromEntries(RUBRICS[detectedCategory].rows.map((row) => [row.name, ""])));
       setAiReview(null);
       setComment("");
-      setNotice("文档已读取。配置模型 API 后即可生成初审建议，需由评审员复核。");
+      setNotice("文档已读取。请先核对模板结构和案例类别，再进行 AI 评分。");
       setView("review");
     } catch (error) { setNotice(error.message || "文档读取失败，请确认文件未损坏。"); }
     finally { setBusy(false); if (fileInput.current) fileInput.current.value = ""; }
@@ -231,6 +237,7 @@ function App() {
 
   async function runAIReview() {
     if (!apiKey || !apiUrl || !model) { setKeyDialogOpen(true); setNotice("请先在模型设置中填写 API 地址、模型名称和 API Key 并测试连接。"); return; }
+    if (templateResult && templateResult.status !== "符合模板" && !window.confirm(`第一步模板核对结果：${templateResult.status}。${templateResult.reasons.join("；")}。是否经人工核对后继续评分？`)) return;
     setConsentOpen(false);
     setBusy(true); setNotice("");
     try {
@@ -248,10 +255,11 @@ function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "AI 初审失败，请稍后重试。");
       const byName = Object.fromEntries(data.results.map((item) => [item.indicator, item]));
+      const suggestedTotal = data.results.reduce((sum, item) => sum + Number(item.score || 0), 0);
       setScores(Object.fromEntries(rubric.rows.map((row) => [row.name, byName[row.name]?.score ?? ""])));
       setAiReview({ ...data, byName, reviewedAt: new Date().toLocaleString("zh-CN") });
       setComment(data.overallComment || "");
-      setNotice("AI 初审建议已生成。请逐项核对评分理由与原文证据，再确认最终评分。");
+      setNotice(`AI 初审建议已生成：${suggestedTotal} 分，${suggestedTotal < 60 ? "低于 60 分，列为筛出建议" : "达到 60 分，列为保留复核建议"}。请逐项核对评分理由与原文证据。`);
     } catch (error) {
       setNotice(error.message || "AI 初审失败，请检查本地服务和模型配置。");
     } finally { setBusy(false); }
@@ -283,8 +291,13 @@ function App() {
     setBatchBusy(true); setBatchProgress(`正在读取 ${files.length} 份 DOCX 文档…`);
     const added = [];
     for (const file of files) {
-      const item = { id: crypto.randomUUID(), name: file.name, category: 1, text: "", sourceFile: file, status: "读取中", result: null, error: "" };
-      try { item.text = await readDocx(file); item.status = "待评审"; }
+      const item = { id: crypto.randomUUID(), name: file.name, category: 1, text: "", sourceFile: file, status: "读取中", result: null, error: "", templateOverride: false };
+      try {
+        item.text = await readDocx(file);
+        item.category = suggestCategory(item.text);
+        item.template = checkTemplate(item.text, item.category);
+        item.status = item.template.status === "符合模板" ? "待评分" : "待核对模板";
+      }
       catch (error) { item.status = "读取失败"; item.error = error.message || "文档读取失败"; }
       added.push(item);
     }
@@ -294,13 +307,14 @@ function App() {
 
   async function reviewBatch() {
     if (!apiKey || !apiUrl || !model) { setKeyDialogOpen(true); setKeyStatus("请先填写 API 地址、模型名称和 API Key 并测试连接，再开始批量评审。"); return; }
-    const pending = batchCases.filter((item) => item.text && !item.result && item.status !== "正在评审");
+    const pending = batchCases.filter((item) => item.text && !item.result && item.status !== "正在评审" && (item.template?.status === "符合模板" || item.templateOverride));
     if (!pending.length) return;
-    if (!window.confirm(`即将依次评审 ${pending.length} 份案例。每份案例都会发送正文、类别和评分要点至你配置的模型服务，并消耗你的模型额度。是否继续？`)) return;
+    if (!window.confirm(`第一步模板核对后，${pending.length} 份进入 AI 评分。每份都会发送正文、类别和评分要点至你配置的模型服务，并消耗模型额度。是否继续？`)) return;
     setBatchBusy(true);
     let finished = 0;
     let succeeded = 0;
     let failed = 0;
+    let stoppedForLimit = false;
     for (const item of pending) {
       const batchRubric = RUBRICS[item.category];
       setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "正在评审", error: "" } : entry));
@@ -308,30 +322,32 @@ function App() {
       try {
         const response = await fetch(`${REVIEW_API_BASE_URL}/api/score`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ apiUrl, model, category: batchRubric.name, text: item.text, rubric: batchRubric.rows.map(({ name, weight, points }) => ({ name, weight, points })) }) });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "AI 初审失败");
+        if (!response.ok) throw Object.assign(new Error(data.error || "AI 初审失败"), { status: response.status });
         const byName = Object.fromEntries(data.results.map((row) => [row.indicator, row]));
         const results = batchRubric.rows.map((row) => ({ ...byName[row.name], max: row.weight }));
         const result = { ...data, results, total: results.reduce((sum, row) => sum + (Number(row.score) || 0), 0) };
-        setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "待人工复核", result } : entry));
+        setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: result.total < 60 ? "低于60分·筛出建议" : "60分及以上·待复核", result } : entry));
         succeeded += 1;
       } catch (error) {
         failed += 1;
         setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "评审失败", error: error.message || "评分失败" } : entry));
+        if (error.status === 429) stoppedForLimit = true;
       }
       finished += 1;
+      if (stoppedForLimit) break;
     }
-    setBatchProgress(`本批评审结束：成功 ${succeeded} 份，失败 ${failed} 份。请人工复核成功案例的分数、理由与引用。`); setBatchBusy(false);
+    setBatchProgress(`本批已处理 ${finished}/${pending.length} 份：成功 ${succeeded} 份，失败 ${failed} 份。${stoppedForLimit ? "模型返回额度或频率限制，已暂停剩余案例；请检查账户后重试。" : "请人工复核分数、理由与引用。"}`); setBatchBusy(false);
   }
 
   function exportBatchExcel() {
-    const done = batchCases.filter((item) => item.result);
-    if (!done.length) return;
-    const summary = [["序号", "案例文件", "案例类别", "总分", "模型", "综合评语", "状态"]];
+    if (!batchCases.length) return;
+    const summary = [["序号", "案例文件", "案例类别", "模板核对", "模板问题", "AI总分", "初筛建议", "模型", "综合评语", "处理状态"]];
     const details = [["案例文件", "案例类别", "评价指标", "满分", "AI建议分", "评分理由", "正文引文"]];
-    done.forEach((item, index) => {
+    batchCases.forEach((item, index) => {
       const itemRubric = RUBRICS[item.category];
-      summary.push([index + 1, item.name, itemRubric.name, item.result.total, item.result.model, item.result.overallComment, "AI初审建议 · 待人工复核"]);
-      for (const result of item.result.results) details.push([item.name, itemRubric.name, result.indicator, result.max, result.score, result.rationale, result.evidence]);
+      const decision = item.result ? item.result.total < 60 ? "低于60分·建议筛出" : "60分及以上·建议保留" : item.template?.status === "不符合模板" ? "模板不符·建议筛出（需复核）" : "未完成评分·待处理";
+      summary.push([index + 1, item.name, itemRubric.name, item.template?.status || "未核对", item.template?.reasons.join("；") || "", item.result?.total ?? "", decision, item.result?.model || "", item.result?.overallComment || "", item.status]);
+      for (const result of item.result?.results || []) details.push([item.name, itemRubric.name, result.indicator, result.max, result.score, result.rationale, result.evidence]);
     });
     const contentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`;
     const rootRels = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
@@ -376,12 +392,13 @@ function App() {
       </header>
 
       {view === "batch" && <main className="secondary-view batch-view">
-        <div className="page-heading"><div><p className="eyebrow">BATCH CASE REVIEW / 批量初审</p><h1>AI案例批量评审</h1><p className="subheading">批量读取 DOCX 正文，逐份评审并导出 Excel 汇总与逐项依据。</p></div><div className="heading-actions"><input ref={batchFileInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple hidden onChange={(event) => addBatchFiles(event.target.files)} /><button className="button primary" disabled={batchBusy} onClick={() => batchFileInput.current?.click()}>批量上传 DOCX</button></div></div>
+        <div className="page-heading"><div><p className="eyebrow">BATCH CASE REVIEW / 批量初审</p><h1>AI案例批量评审</h1><p className="subheading">先核对案例信息表模板，再按评分标准逐份评分；低于 60 分列为筛出建议。</p></div><div className="heading-actions"><input ref={batchFileInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple hidden onChange={(event) => addBatchFiles(event.target.files)} /><button className="button primary" disabled={batchBusy} onClick={() => batchFileInput.current?.click()}>批量上传 DOCX</button></div></div>
         {batchProgress && <div className="notice batch-notice" role="status">{batchProgress}</div>}
+        {batchCases.length > 0 && <div className="notice batch-notice" role="status">第一步模板不符 {batchCases.filter((item) => item.template?.status === "不符合模板" && !item.templateOverride).length} 份；第二步已评分 {scoredCount} 份，其中低于 60 分 {batchCases.filter((item) => item.result?.total < 60).length} 份。当前筛出建议合计 {screenedCount} 份；300 份为统计目标，不改变评分线。</div>}
         <section className="batch-panel panel">
-          <div className="batch-toolbar"><div><span className="panel-kicker">案例队列</span><h2>本批案例 <span className="count">{batchCases.length} 份</span></h2><p>每份案例可单独选择类别；评审按队列逐篇发送。</p></div><div className="heading-actions"><button className="button quiet" disabled={!batchCases.length || batchBusy} onClick={() => setBatchCases([])}>清空列表</button><button className="button quiet" disabled={!batchCases.some((item) => item.result)} onClick={exportBatchExcel}>导出 Excel</button><button className="button ai-button" disabled={batchBusy || !batchCases.some((item) => item.text && !item.result)} onClick={reviewBatch}>{batchBusy ? "正在批量评审…" : "开始批量评审"}</button></div></div>
-          {!batchCases.length ? <div className="empty-state"><h2>上传 DOCX 案例文档</h2><p>支持一次选择多份 Word 文档。正文将用于评分，不会保存在服务端。</p><button className="button primary" onClick={() => batchFileInput.current?.click()}>选择多个文件</button></div> : <div className="batch-list"><div className="batch-row batch-header"><span>案例文件</span><span>案例类别</span><span>状态</span><span>建议总分</span><span>操作</span></div>{batchCases.map((item) => <article className="batch-row" key={item.id}><div className="batch-name"><strong title={item.name}>{item.name}</strong>{item.error && <small>{item.error}</small>}</div><select aria-label={`${item.name}案例类别`} value={item.category} disabled={batchBusy || Boolean(item.result)} onChange={(event) => setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, category: Number(event.target.value) } : entry))}>{Object.entries(RUBRICS).map(([id, itemRubric]) => <option key={id} value={id}>{id}. {itemRubric.name}</option>)}</select><span className={`batch-status ${item.result ? "done" : item.status === "评审失败" || item.status === "读取失败" ? "error" : ""}`}>{item.status}</span><strong className="batch-score">{item.result ? `${item.result.total} / 100` : "—"}</strong><div className="batch-actions">{item.result && <button className="text-button" onClick={() => { setCategory(item.category); setDoc({ title: item.name.replace(/\.docx$/i, ""), fileName: item.name, text: item.text, sourceFile: item.sourceFile, demo: false }); setScores(Object.fromEntries(item.result.results.map((row) => [row.indicator, row.score]))); setAiReview({ ...item.result, byName: Object.fromEntries(item.result.results.map((row) => [row.indicator, row])), reviewedAt: "批量评审结果" }); setComment(item.result.overallComment || ""); setView("review"); }}>查看详情</button>}<button className="text-button remove-case" disabled={batchBusy} onClick={() => setBatchCases((current) => current.filter((entry) => entry.id !== item.id))}>移除</button></div></article>)}</div>}
-          {batchCases.some((item) => item.result) && <p className="batch-footnote">Excel 包含评审汇总与逐项评分两张表；AI分数、理由和引文均为初审建议，需人工复核。</p>}
+          <div className="batch-toolbar"><div><span className="panel-kicker">案例队列</span><h2>本批案例 <span className="count">{batchCases.length} 份</span></h2><p>每份案例先核对对应模板；疑似不符可人工确认后继续评分。建议分批处理并及时导出。</p></div><div className="heading-actions"><button className="button quiet" disabled={!batchCases.length || batchBusy} onClick={() => setBatchCases([])}>清空列表</button><button className="button quiet" disabled={!batchCases.length} onClick={exportBatchExcel}>导出 Excel</button><button className="button ai-button" disabled={batchBusy || !batchCases.some((item) => item.text && !item.result && (item.template?.status === "符合模板" || item.templateOverride))} onClick={reviewBatch}>{batchBusy ? "正在批量评审…" : "开始批量评审"}</button></div></div>
+          {!batchCases.length ? <div className="empty-state"><h2>上传 DOCX 案例文档</h2><p>支持一次选择多份 Word 文档。正文将用于评分，不会保存在服务端。</p><button className="button primary" onClick={() => batchFileInput.current?.click()}>选择多个文件</button></div> : <div className="batch-list"><div className="batch-row batch-header"><span>案例文件</span><span>案例类别</span><span>状态</span><span>建议总分</span><span>操作</span></div>{batchCases.map((item) => <article className="batch-row" key={item.id}><div className="batch-name"><strong title={item.name}>{item.name}</strong>{item.error && <small>{item.error}</small>}{item.template && <small>模板：{item.template.status}{item.template.reasons.length ? ` · ${item.template.reasons.join("；")}` : ""}</small>}</div><select aria-label={`${item.name}案例类别`} value={item.category} disabled={batchBusy || Boolean(item.result)} onChange={(event) => setBatchCases((current) => current.map((entry) => { if (entry.id !== item.id) return entry; const nextCategory = Number(event.target.value); const template = checkTemplate(entry.text, nextCategory); return { ...entry, category: nextCategory, template, templateOverride: false, status: template.status === "符合模板" ? "待评分" : "待核对模板" }; }))}>{Object.entries(RUBRICS).map(([id, itemRubric]) => <option key={id} value={id}>{id}. {itemRubric.name}</option>)}</select><span className={`batch-status ${item.result ? "done" : item.status === "评审失败" || item.status === "读取失败" ? "error" : ""}`}>{item.status}</span><strong className="batch-score">{item.result ? `${item.result.total} / 100` : "—"}</strong><div className="batch-actions">{item.text && !item.result && item.template?.status !== "符合模板" && <button className="text-button" disabled={batchBusy} onClick={() => setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, templateOverride: !entry.templateOverride, status: entry.templateOverride ? "待核对模板" : "人工确认·待评分" } : entry))}>{item.templateOverride ? "撤销确认" : "人工确认继续"}</button>}{item.result && <button className="text-button" onClick={() => { setCategory(item.category); setDoc({ title: item.name.replace(/\.docx$/i, ""), fileName: item.name, text: item.text, sourceFile: item.sourceFile, demo: false }); setScores(Object.fromEntries(item.result.results.map((row) => [row.indicator, row.score]))); setAiReview({ ...item.result, byName: Object.fromEntries(item.result.results.map((row) => [row.indicator, row])), reviewedAt: "批量评审结果" }); setComment(item.result.overallComment || ""); setView("review"); }}>查看详情</button>}<button className="text-button remove-case" disabled={batchBusy} onClick={() => setBatchCases((current) => current.filter((entry) => entry.id !== item.id))}>移除</button></div></article>)}</div>}
+          {batchCases.length > 0 && <p className="batch-footnote">Excel 包含全部案例的模板核对、评分与初筛建议，以及已评分案例的逐项依据。筛出建议须人工复核。</p>}
         </section>
       </main>}
 
@@ -390,6 +407,7 @@ function App() {
           <div><p className="eyebrow">CASE REVIEW / 评审工作台</p><h1>案例初审与评分</h1><p className="subheading">依据大赛评审标准逐项查看材料与证据，形成可复核的评分记录。</p></div>
           <div className="heading-actions"><button className="button quiet" onClick={() => fileInput.current?.click()}>更换案例文档</button><input ref={fileInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden onChange={(e) => loadFile(e.target.files?.[0])} /></div>
         </div>
+        {templateResult && <div className="notice" role="status">第一步 · 模板核对：{templateResult.status}。{templateResult.reasons.length ? templateResult.reasons.join("；") : "已检出对应模板的主要栏目。"} 模板判断基于提取文字，需结合原始 Word 复核。</div>}
         {(notice || busy) && <div className="notice" role="status">{busy ? "正在读取 DOCX 文档…" : notice}</div>}
         <div className="workspace">
           <section className="document-panel panel">
