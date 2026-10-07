@@ -1,57 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { renderAsync } from "docx-preview";
+import { effectiveTemplate, templateFailures, orderCases, rankBatch, screeningDecision } from "./batchScreening.js";
+import { readDocument, supportedFile } from "./documentReader.js";
+import { requestWithRetry, wait } from "./reviewQueue.js";
+import { RUBRICS } from "./rubrics.js";
 import { checkTemplate, suggestCategory } from "./templateCheck.js";
 
 const REVIEW_API_BASE_URL = (import.meta.env.VITE_REVIEW_API_BASE_URL || "").replace(/\/+$/, "");
-
-const RUBRICS = {
-  1: {
-    name: "AI赋能教学案例",
-    short: "AI赋能教学",
-    intro: "关注人工智能如何优化教师教学设计与课堂实施。",
-    rows: [
-      { name: "规范性", weight: 10, points: ["材料齐全，文本结构清晰，重点突出，不存在意识形态问题。", "视频画面稳定清楚，声画同步，讲解简洁流畅、详略得当。", "AI使用遵循规范，并说明技术选用依据，符合伦理要求。"], sample: 8 },
-      { name: "教学设计", weight: 25, points: ["教学目标符合课程标准，指向学生核心素养。", "教学主题明确，符合学生发展水平，贴合学生生活、兴趣和需要。", "借助人工智能技术优化教学设计、创设教学情境、广泛发掘教学资源、开展教学评价等，破解教学重难点。", "方案体现以学生发展为中心的理念，促进教学目标的实现及核心素养的落实。"], sample: 20 },
-      { name: "教学实施", weight: 30, points: ["清晰、准确、有条理地阐释教学内容，并根据课堂情况进行有效调整，突破难点，展现教师的教学机智与教学风格。", "借助人工智能技术为学生提供了个性化资源、学习体验与实施反馈，有效突破教学重难点，促进学生深度学习。", "有意识地培养学生恰当使用人工智能的意识与方法。", "教学过程与技术使用均非常流畅，能熟练处理人工智能在教学中可能出现的技术故障和安全问题。", "将正确的情感态度和价值观渗透到课堂教学中。"], sample: 24 },
-      { name: "教学效果", weight: 25, points: ["学生的课堂参与度高，教学目标达成度高。", "建立合理的评估方法和指标，有效评估学生学习成果和教学效果。", "师生关系融洽和谐，学习氛围民主平等、积极向上。", "学生能辩证地看待和运用人工智能产品。（如若课堂中未有学生使用AI工具的环节，则该指标可忽略）"], sample: 19 },
-      { name: "教学创新", weight: 10, points: ["在教学内容、教学方法、教学模式、AI应用等方面有创新，具有示范、推广价值。"], sample: 8 },
-    ],
-  },
-  2: {
-    name: "AI支持学生学习案例",
-    short: "AI支持学习",
-    intro: "关注学生使用人工智能开展自主、合作与探究学习的过程。",
-    rows: [
-      { name: "规范性", weight: 10, points: ["材料齐全，文本结构清晰，重点突出，不存在意识形态问题。", "视频画面稳定清楚，声画同步，讲解简洁流畅、详略得当。", "使用人工智能相关技术时遵循规范，并说明技术来源与使用依据，符合伦理要求。"], sample: 8 },
-      { name: "教学设计", weight: 25, points: ["教学目标符合课程标准，指向学生核心素养。", "教学主题明确，符合学生发展水平，贴合学生生活、兴趣和需要。", "学习活动以学生为中心展开，强调学生充分利用AI技术工具开展自主、合作、探究学习。", "学习任务具体合理，具有现实意义和挑战性，支持学生在完成任务的过程中深化对相关知识、方法的理解与运用。", "提供了与主题密切相关的资源、支架等学习支持，帮助学生有效开展学习。", "学习评价指向学习目标，设计清晰合理，可操作性强。"], sample: 20 },
-      { name: "教学实施", weight: 30, points: ["教师清晰地介绍学习任务、评价标准和活动安排，并确认学生理解。", "学生有序且高效地运用相关资源和工具开展学习，AI工具在学生学习过程中发挥重要的支撑作用。", "教师及时了解学生学习进展，给予针对性指导，必要时根据学生情况调整活动安排。", "教学过程与技术使用均非常流畅，师生能够熟练运用AI工具，灵活处理学习过程中的技术问题和安全问题。", "将正确的情感态度和价值观渗透到课堂教学中。"], sample: 23 },
-      { name: "教学效果", weight: 25, points: ["学生的课堂参与度高，教学目标达成度高。", "学习成果体现了学生的批判性思考或创造性的解决方案，以及对AI技术工具的辩证理解与有效运用。", "师生关系融洽和谐，学习氛围民主平等、积极向上。"], sample: 19 },
-      { name: "教学创新", weight: 10, points: ["在教学内容、教学方法、教学模式等方面有创新，具有示范推广价值。"], sample: 8 },
-    ],
-  },
-  3: {
-    name: "智能体开发与应用案例",
-    short: "智能体开发",
-    intro: "关注真实需求、智能体设计实现及应用成效证据。",
-    rows: [
-      { name: "规范性", weight: 10, points: ["材料齐全，文本结构清晰，重点突出，不存在意识形态问题。", "智能体功能说明清晰，操作指引明确，评审者可顺利体验智能体核心功能。", "AI使用遵循规范，符合伦理要求，注意数据安全与隐私保护，对智能体输出内容的可靠性有必要的提示与约束。"], sample: 8 },
-      { name: "需求分析与方案设计", weight: 20, points: ["需求分析准确深入，清晰识别教学、评价、教研或日常管理等工作中的真实痛点与难点，问题具有普遍性或代表性。", "功能定位合理，与需求高度匹配，目标明确可衡量。", "方案设计思路清晰，技术路线可行，体现对智能体能力边界的合理认知与预期。"], sample: 15 },
-      { name: "开发实现", weight: 30, points: ["智能体核心提示词设计规范、专业，角色定位、任务指令、约束条件等要素完整，能有效引导智能体稳定输出高质量结果。", "扩展功能（如知识库、插件、工作流等，如有）设计合理，与核心功能协同配合，提升智能体整体能力。", "开发过程体现迭代优化意识，对遇到的问题有深入分析并有效解决。", "智能体输出结果质量稳定、准确可靠，符合相关工作的专业要求。"], sample: 23 },
-      { name: "应用成效", weight: 25, points: ["应用场景真实，应用过程描述详实，人机协作方式合理高效。", "智能体在实际应用中有效解决或缓解了所识别的痛点难点，切实体现“减负提质”的效果。", "应用成效有具体数据或事实支撑，如工作效率提升、结果质量改善、难点突破等。", "对智能体输出结果有批判性审视，能识别并说明其局限性与适用边界。"], sample: 19 },
-      { name: "创新与可推广性", weight: 15, points: ["在需求洞察、功能设计、技术实现或应用模式等方面有创新，不同于常见通用方案。", "智能体具有较好的可迁移性和适应性，能推广至不同群体、不同领域或不同地域的应用场景。", "开发与应用经验具有参考价值，能为其他教师开发和应用智能体提供借鉴。"], sample: 11 },
-    ],
-  },
-  4: {
-    name: "教师智能素养提升组织实施案例",
-    short: "组织实施",
-    intro: "关注立足本地实际的研修设计、实施路径与教师发展成效。",
-    rows: [
-      { name: "规范性", weight: 15, points: ["案例真实完整，思路清晰，内容聚焦，表述严谨，不存在意识形态问题，符合伦理安全要求。", "视频画面稳定清楚，声画同步，讲解简洁流畅、详略得当。"], sample: 12 },
-      { name: "问题与解决思路", weight: 50, points: ["问题具有现实意义，是教师智能素养提升的关键问题。", "立足本地/本校实际，探索、创新教师智能素养提升的研修模式、评价方式、培训团队建设、资源开发模式等。", "以任务为驱动，以成果为导向，对培训、教研、实践、展示进行贯通性设计。", "用图表清晰展示案例模式、方法和策略，所采用的模式、方法和策略可操作、可迁移。"], sample: 39 },
-      { name: "成效与创新", weight: 35, points: ["有效推动教师立足岗位开展高质量学习与实践，促进本地区或本单位教师智能素养提升，成果丰富、成效显著，并有数据支持。", "解决思路具有示范推广价值。"], sample: 27 },
-    ],
-  },
-};
 
 const DEMO_TEXT = `一、案例背景与问题\n在新课程改革和核心素养导向下，地理教学需要从知识传授转向素养培育。传统课堂中，学生的探究活动常受限于课堂时间、资料获取难度和教师个别指导的精力，难以实现真正的个性化学习。\n\n二、教学目标与设计\n本案例以课程标准为依据，聚焦区域认知、综合思维与人地协调观。教师结合学生的生活经验，设计“城市热岛效应的成因与应对”探究任务，提供地图、气温记录和分层学习支架。\n\n三、实施过程\n学生以小组形式提出问题、收集资料、比较分析并展示方案。教师使用人工智能工具生成差异化阅读材料和追问建议，学生核对资料来源，讨论AI回答的适用边界。教师根据学生反馈调整活动节奏，并准备离线材料应对网络故障。\n\n四、学习成果与评价\n评价结合过程记录、小组成果和个人反思。学生完成专题地图与改善建议，课堂观察记录显示多数小组能引用证据解释区域差异。\n\n五、反思与改进\n案例仍需补充更完整的前后测数据，并进一步说明AI生成资料的审核流程。后续将优化学习支架，邀请学生共同修订评价量规。`;
 
@@ -133,6 +88,18 @@ function OriginalWordPreview({ file }) {
   return <div className="word-preview-scroll"><div className="word-preview-status" role="status">{status}</div><div ref={previewRef} className="word-preview-pages" /></div>;
 }
 
+function OriginalDocumentPreview({ file }) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    if (!file) return;
+    const next = URL.createObjectURL(file); setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file]);
+  if (!file || /\.docx$/i.test(file.name)) return <OriginalWordPreview file={file} />;
+  if (/\.pdf$/i.test(file.name)) return <div className="pdf-preview"><object data={url} type="application/pdf" aria-label="原始PDF文档"><a href={url} target="_blank" rel="noreferrer">打开原始PDF</a></object><a href={url} target="_blank" rel="noreferrer">单独打开原始PDF</a></div>;
+  return <div className="word-preview-empty"><p>DOC正文已解析。浏览器无法还原旧版Word版式，可下载后在Word或WPS中核对。</p><a href={url} download={file.name}>下载原始DOC</a></div>;
+}
+
 function makeEvidence(text, row, demo) {
   if (!text) return "上传案例文档后，可在正文中核对相关依据。";
   const paragraphs = text.split(/\n+/).map((item) => item.trim()).filter((item) => item && !/^(一、|二、|三、|四、|五、|\d+[.、])/.test(item));
@@ -200,26 +167,38 @@ function App() {
   const [keyStatus, setKeyStatus] = useState("");
   const [keyConnected, setKeyConnected] = useState(() => Boolean(sessionStorage.getItem("review-api-key") && sessionStorage.getItem("review-api-url") && sessionStorage.getItem("review-model")));
   const [batchCases, setBatchCases] = useState([]);
+  const [screenPercentage, setScreenPercentage] = useState(50);
+  const [requestInterval, setRequestInterval] = useState(10);
+  const stopBatch = useRef(false);
+  const [availableModels, setAvailableModels] = useState([]);
+  const [modelLoading, setModelLoading] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(() => Number(sessionStorage.getItem("review-output-budget")) || 8192);
+  const [singleTemplateOverride, setSingleTemplateOverride] = useState(false);
   const [batchDeclaredCategory, setBatchDeclaredCategory] = useState(0);
+  const [batchReading, setBatchReading] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchProgress, setBatchProgress] = useState("");
   const rubric = RUBRICS[category];
   const assigned = rubric.rows.filter((row) => scores[row.name] !== "" && scores[row.name] != null).length;
   const total = useMemo(() => rubric.rows.reduce((sum, row) => sum + (Number(scores[row.name]) || 0), 0), [rubric, scores]);
-  const screenedCount = batchCases.filter((item) => item.result?.total < 60 || (!item.result && item.template?.status === "不符合模板" && !item.templateOverride)).length;
-  const scoredCount = batchCases.filter((item) => item.result).length;
+  const ranking = useMemo(() => rankBatch(batchCases, screenPercentage), [batchCases, screenPercentage]);
+  const failures = templateFailures(batchCases);
+  const orderedCases = useMemo(() => orderCases(batchCases), [batchCases]);
+  const scoredCount = ranking.scored;
 
   async function loadFile(file) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".docx")) { setNotice("请上传 .docx 格式的案例文档。"); return; }
+    if (!file || busy || batchBusy) return;
+    if (!supportedFile(file)) { setNotice("请上传DOC、DOCX或PDF案例文档。"); return; }
     setBusy(true); setNotice("");
     try {
-      const text = await readDocx(file);
+      const text = await readDocument(file, readDocx);
       const detectedCategory = suggestCategory(text);
       setCategory(detectedCategory);
-      setDoc({ title: file.name.replace(/\.docx$/i, ""), fileName: file.name, text, sourceFile: file, demo: false });
+      setDoc({ title: file.name.replace(/\.(docx?|pdf)$/i, ""), fileName: file.name, text, sourceFile: file, demo: false });
       setDocumentView("document");
       setScores(Object.fromEntries(RUBRICS[detectedCategory].rows.map((row) => [row.name, ""])));
+      setSingleTemplateOverride(false);
       setAiReview(null);
       setComment("");
       setNotice("文档已读取。请先核对模板结构和案例类别，再进行 AI 评分。");
@@ -229,6 +208,9 @@ function App() {
   }
 
   function switchCategory(id) {
+    if (busy || batchBusy) return;
+    setSingleTemplateOverride(false);
+    if (doc.batchId) setBatchCases((items) => items.map((item) => item.id === doc.batchId ? { ...item, category: id, template: checkTemplate(item.text, id), templateOverride: false, result: null, error: "", status: "待核对模板" } : item));
     setCategory(id);
     setScores(Object.fromEntries(RUBRICS[id].rows.map((row) => [row.name, doc.demo ? row.sample : ""])));
     setAiReview(null);
@@ -238,29 +220,33 @@ function App() {
 
   async function runAIReview() {
     if (!apiKey || !apiUrl || !model) { setKeyDialogOpen(true); setNotice("请先在模型设置中填写 API 地址、模型名称和 API Key 并测试连接。"); return; }
-    if (templateResult && templateResult.status !== "符合模板" && !window.confirm(`第一步模板核对结果：${templateResult.status}。${templateResult.reasons.join("；")}。是否经人工核对后继续评分？`)) return;
+    if (busy || batchBusy) return;
+    if (templateResult && templateResult.status !== "符合模板" && !singleTemplateOverride) {
+      if (!window.confirm(`第一步模板核对结果：${templateResult.status}。${templateResult.reasons.join("；")}。是否经人工核对后继续评分？`)) return;
+      setSingleTemplateOverride(true);
+      if (doc.batchId) setBatchCases((items) => items.map((item) => item.id === doc.batchId ? { ...item, templateOverride: true, status: item.result ? "评分完成·待复核" : "人工确认·待评分" } : item));
+    }
     setConsentOpen(false);
     setBusy(true); setNotice("");
     try {
-      const response = await fetch(`${REVIEW_API_BASE_URL}/api/score`, {
+      const data = await requestWithRetry(() => fetch(`${REVIEW_API_BASE_URL}/api/score`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           category: rubric.name,
           apiUrl,
-          model,
+          model, maxOutputTokens,
           text: doc.text,
           rubric: rubric.rows.map(({ name, weight, points }) => ({ name, weight, points })),
         }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "AI 初审失败，请稍后重试。");
+      }), (seconds) => setNotice(`暂时限流，${seconds}秒后自动重试…`));
       const byName = Object.fromEntries(data.results.map((item) => [item.indicator, item]));
       const suggestedTotal = data.results.reduce((sum, item) => sum + Number(item.score || 0), 0);
       setScores(Object.fromEntries(rubric.rows.map((row) => [row.name, byName[row.name]?.score ?? ""])));
       setAiReview({ ...data, byName, reviewedAt: new Date().toLocaleString("zh-CN") });
+      if (doc.batchId) setBatchCases((items) => items.map((item) => item.id === doc.batchId ? { ...item, status: "评分完成·待复核", error: "", result: { ...data, total: suggestedTotal, results: data.results.map((row) => ({ ...row, max: rubric.rows.find((r) => r.name === row.indicator).weight })) } } : item));
       setComment(data.overallComment || "");
-      setNotice(`AI 初审建议已生成：${suggestedTotal} 分，${suggestedTotal < 60 ? "低于 60 分，列为筛出建议" : "达到 60 分，列为保留复核建议"}。请逐项核对评分理由与原文证据。`);
+      setNotice(`AI 初审建议已生成：${suggestedTotal} 分。请逐项核对评分理由与原文证据。`);
     } catch (error) {
       setNotice(error.message || "AI 初审失败，请检查本地服务和模型配置。");
     } finally { setBusy(false); }
@@ -273,9 +259,10 @@ function App() {
     if (!candidateUrl || !candidateModel || !candidate) { setKeyStatus("请填写 API 地址、模型名称和 API Key。"); return; }
     setKeyTesting(true); setKeyStatus("正在测试模型连接…");
     try {
-      const response = await fetch(`${REVIEW_API_BASE_URL}/api/test-key`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${candidate}` }, body: JSON.stringify({ apiUrl: candidateUrl, model: candidateModel }) });
+      const response = await fetch(`${REVIEW_API_BASE_URL}/api/test-key`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${candidate}` }, body: JSON.stringify({ apiUrl: candidateUrl, model: candidateModel, maxOutputTokens }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "连接测试失败。");
+      sessionStorage.setItem("review-output-budget", String(maxOutputTokens));
       sessionStorage.setItem("review-api-key", candidate);
       sessionStorage.setItem("review-api-url", candidateUrl); sessionStorage.setItem("review-model", candidateModel);
       setApiKey(candidate); setKeyDraft(candidate); setApiUrl(candidateUrl); setModel(candidateModel); setApiUrlDraft(candidateUrl); setModelDraft(candidateModel); setKeyConnected(true);
@@ -287,14 +274,15 @@ function App() {
   }
 
   async function addBatchFiles(fileList) {
-    const files = Array.from(fileList || []).filter((file) => file.name.toLowerCase().endsWith(".docx"));
-    if (!files.length) { setNotice("请选择 .docx 格式的案例文档。"); return; }
-    setBatchBusy(true); setBatchProgress(`正在读取 ${files.length} 份 DOCX 文档…`);
+    if (busy || batchBusy) return;
+    const files = Array.from(fileList || []).filter((file) => supportedFile(file));
+    if (!files.length) { setNotice("请选择DOC、DOCX或PDF案例文档。"); return; }
+    setBatchReading(true); setBatchBusy(true); setBatchProgress(`正在读取 ${files.length} 份案例文档…`);
     const added = [];
     for (const file of files) {
       const item = { id: crypto.randomUUID(), name: file.name, category: 1, text: "", sourceFile: file, status: "读取中", result: null, error: "", templateOverride: false };
       try {
-        item.text = await readDocx(file);
+        item.text = await readDocument(file, readDocx);
         item.category = batchDeclaredCategory || suggestCategory(item.text);
         item.template = checkTemplate(item.text, item.category);
         item.status = item.template.status === "符合模板" ? "待评分" : "待核对模板";
@@ -302,52 +290,54 @@ function App() {
       catch (error) { item.status = "读取失败"; item.error = error.message || "文档读取失败"; }
       added.push(item);
     }
-    setBatchCases((current) => [...current, ...added]); setBatchProgress(""); setBatchBusy(false);
+    setBatchCases((current) => [...current, ...added]); setBatchProgress(""); setBatchBusy(false); setBatchReading(false);
     if (batchFileInput.current) batchFileInput.current.value = "";
   }
 
   async function reviewBatch() {
+    if (busy || batchBusy) return;
     if (!apiKey || !apiUrl || !model) { setKeyDialogOpen(true); setKeyStatus("请先填写 API 地址、模型名称和 API Key 并测试连接，再开始批量评审。"); return; }
     const pending = batchCases.filter((item) => item.text && !item.result && item.status !== "正在评审" && (item.template?.status === "符合模板" || item.templateOverride));
     if (!pending.length) return;
     if (!window.confirm(`第一步模板核对后，${pending.length} 份进入 AI 评分。每份都会发送正文、类别和评分要点至你配置的模型服务，并消耗模型额度。是否继续？`)) return;
+    stopBatch.current = false;
     setBatchBusy(true);
     let finished = 0;
     let succeeded = 0;
     let failed = 0;
     let stoppedForLimit = false;
     for (const item of pending) {
+      if (stopBatch.current) break;
       const batchRubric = RUBRICS[item.category];
       setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "正在评审", error: "" } : entry));
       setBatchProgress(`正在评审 ${finished + 1}/${pending.length}：${item.name}`);
       try {
-        const response = await fetch(`${REVIEW_API_BASE_URL}/api/score`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ apiUrl, model, category: batchRubric.name, text: item.text, rubric: batchRubric.rows.map(({ name, weight, points }) => ({ name, weight, points })) }) });
-        const data = await response.json();
-        if (!response.ok) throw Object.assign(new Error(data.error || "AI 初审失败"), { status: response.status });
+        const data = await requestWithRetry(() => fetch(`${REVIEW_API_BASE_URL}/api/score`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ apiUrl, model, maxOutputTokens, category: batchRubric.name, text: item.text, rubric: batchRubric.rows.map(({ name, weight, points }) => ({ name, weight, points })) }) }), (seconds, attempt) => setBatchProgress(`${item.name}：等待${seconds}秒后重试（${attempt}/2），其他案例尚未发送。`));
         const byName = Object.fromEntries(data.results.map((row) => [row.indicator, row]));
         const results = batchRubric.rows.map((row) => ({ ...byName[row.name], max: row.weight }));
         const result = { ...data, results, total: results.reduce((sum, row) => sum + (Number(row.score) || 0), 0) };
-        setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: result.total < 60 ? "低于60分·筛出建议" : "60分及以上·待复核", result } : entry));
+        setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "评分完成·待复核", result } : entry));
         succeeded += 1;
       } catch (error) {
         failed += 1;
         setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "评审失败", error: error.message || "评分失败" } : entry));
-        if (error.status === 429) stoppedForLimit = true;
+        if ([429, 402, 401].includes(error.status)) stoppedForLimit = true;
       }
       finished += 1;
-      if (stoppedForLimit) break;
+      if (stoppedForLimit || stopBatch.current) break;
+      if (finished < pending.length) { setBatchProgress(`已完成${finished}/${pending.length}，等待${requestInterval}秒后处理下一份…`); await wait(requestInterval); }
     }
-    setBatchProgress(`本批已处理 ${finished}/${pending.length} 份：成功 ${succeeded} 份，失败 ${failed} 份。${stoppedForLimit ? "模型返回额度或频率限制，已暂停剩余案例；请检查账户后重试。" : "请人工复核分数、理由与引用。"}`); setBatchBusy(false);
+    setBatchProgress(`本批已处理 ${finished}/${pending.length} 份：成功 ${succeeded} 份，失败 ${failed} 份。${stoppedForLimit ? "服务商限制或权限错误，已暂停剩余案例；请根据该案例错误提示处理后继续。" : stopBatch.current ? "已暂停；再次开始将跳过已完成案例。" : "请人工复核分数、理由与引用。"}`); setBatchBusy(false);
   }
 
   function exportBatchExcel() {
     if (!batchCases.length) return;
-    const summary = [["序号", "案例文件", "案例类别", "模板核对", "模板问题", "AI总分", "初筛建议", "模型", "综合评语", "处理状态"]];
+    const summary = [["序号", "案例文件", "案例类别", "模板核对", "模板问题", "AI总分", "初筛建议", "模型", "综合评语", "处理状态", "本批筛出比例", "排名是否最终", "原始模板核对"]];
     const details = [["案例文件", "案例类别", "评价指标", "满分", "AI建议分", "评分理由", "正文引文"]];
     batchCases.forEach((item, index) => {
       const itemRubric = RUBRICS[item.category];
-      const decision = item.result ? item.result.total < 60 ? "低于60分·建议筛出" : "60分及以上·建议保留" : item.template?.status === "不符合模板" ? "模板不符·建议筛出（需复核）" : "未完成评分·待处理";
-      summary.push([index + 1, item.name, itemRubric.name, item.template?.status || "未核对", item.template?.reasons.join("；") || "", item.result?.total ?? "", decision, item.result?.model || "", item.result?.overallComment || "", item.status]);
+      const decision = screeningDecision(item, ranking);
+      summary.push([index + 1, item.name, itemRubric.name, effectiveTemplate(item), item.template?.reasons.join("；") || "", item.result?.total ?? "", decision, item.result?.model || "", item.result?.overallComment || "", item.status, `${screenPercentage}%`, ranking.complete ? "是" : "暂定（评分未完成）", item.template?.status || "未核对"]);
       for (const result of item.result?.results || []) details.push([item.name, itemRubric.name, result.indicator, result.max, result.score, result.rationale, result.evidence]);
     });
     const contentTypes = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`;
@@ -359,7 +349,7 @@ function App() {
   }
 
   function exportTemplateFailures() {
-    const failures = batchCases.filter((item) => item.template?.status === "不符合模板");
+    const failures = templateFailures(batchCases);
     if (!failures.length) return;
     const rows = [["序号", "案例文件", "核对类别", "模板核对结果", "不符合原因", "人工确认继续评分"]];
     failures.forEach((item, index) => rows.push([index + 1, item.name, RUBRICS[item.category].name, item.template.status, item.template.reasons.join("；"), item.templateOverride ? "是" : "否"]));
@@ -371,8 +361,31 @@ function App() {
     const link = document.createElement("a"); const url = URL.createObjectURL(blob); link.href = url; link.download = `案例模板不符合名单_${new Date().toISOString().slice(0, 10)}.xlsx`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  async function fetchModels() {
+    if (!apiUrlDraft.trim() || !keyDraft.trim()) { setKeyStatus("请先填写接口地址和API Key。"); return; }
+    setModelLoading(true); setKeyStatus("正在获取模型列表…");
+    try {
+      const response = await fetch(`${REVIEW_API_BASE_URL}/api/models`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${keyDraft.trim()}` }, body: JSON.stringify({ apiUrl: apiUrlDraft.trim() }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "无法获取模型列表，可手动填写模型ID。");
+      setAvailableModels(data.models); setKeyStatus(`获取到${data.models.length}个模型，请选择并测试连接。模型列表不保证全部有调用权限。`);
+    } catch (error) { setAvailableModels([]); setKeyStatus(error.message); }
+    finally { setModelLoading(false); }
+  }
+
+  async function exportBatchWord() {
+    setReportBusy(true);
+    try {
+      const { createReviewReport } = await import("./reportDocument.js");
+      const blob = await createReviewReport(batchCases, ranking, screenPercentage);
+      const url = URL.createObjectURL(blob), link = document.createElement("a");
+      link.href = url; link.download = `案例批量初审完整报告_${new Date().toISOString().slice(0, 10)}.docx`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { console.error("Report generation failed", error); setBatchProgress("Word报告生成失败，请重试或先导出Excel保留结果。"); }
+    finally { setReportBusy(false); }
+  }
+
   function clearApiKey() {
-    for (const key of ["review-api-key", "review-api-url", "review-model"]) sessionStorage.removeItem(key);
+    for (const key of ["review-api-key", "review-api-url", "review-model", "review-output-budget"]) sessionStorage.removeItem(key);
     setApiKey(""); setKeyDraft(""); setApiUrl(""); setModel(""); setApiUrlDraft(""); setModelDraft(""); setKeyConnected(false); setKeyStatus("已清除本次浏览器会话中保存的模型配置。");
   }
 
@@ -402,17 +415,18 @@ function App() {
           <button className={view === "history" ? "active" : ""} onClick={() => setView("history")}>评审记录</button>
           <button className={view === "standards" ? "active" : ""} onClick={() => setView("standards")}>评分标准</button>
         </nav>
-        <button className="top-meta settings-button" onClick={() => { setKeyDraft(apiKey); setApiUrlDraft(apiUrl); setModelDraft(model); setKeyStatus(""); setKeyDialogOpen(true); }}><span className={`key-indicator ${apiKey && apiUrl && model ? "ready" : ""}`} />{apiKey && apiUrl && model ? "模型已配置" : "模型设置 · 配置 API"}</button>
+        <button className="top-meta settings-button" disabled={busy || batchBusy} onClick={() => { setKeyDraft(apiKey); setApiUrlDraft(apiUrl); setModelDraft(model); setKeyStatus(""); setKeyDialogOpen(true); }}><span className={`key-indicator ${apiKey && apiUrl && model ? "ready" : ""}`} />{apiKey && apiUrl && model ? "模型已配置" : "模型设置 · 配置 API"}</button>
       </header>
 
       {view === "batch" && <main className="secondary-view batch-view">
-        <div className="page-heading"><div><p className="eyebrow">BATCH CASE REVIEW / 批量初审</p><h1>AI案例批量评审</h1><p className="subheading">先核对案例信息表模板，再按评分标准逐份评分；低于 60 分列为筛出建议。</p></div><div className="heading-actions"><input ref={batchFileInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" multiple hidden onChange={(event) => addBatchFiles(event.target.files)} /><button className="button primary" disabled={batchBusy} onClick={() => batchFileInput.current?.click()}>批量上传 DOCX</button></div></div>
+        <div className="page-heading"><div><p className="eyebrow">BATCH CASE REVIEW / 批量初审</p><h1>AI案例批量评审</h1><p className="subheading">先核对模板，再逐份评分；按本批总分排名生成可调整的筛出建议。</p></div><div className="heading-actions"><input ref={batchFileInput} type="file" accept=".doc,.docx,.pdf" multiple hidden onChange={(event) => addBatchFiles(event.target.files)} /><button className="button primary" disabled={busy || batchBusy} onClick={() => batchFileInput.current?.click()}>批量上传文档</button></div></div>
         <div className="batch-category-setting"><label htmlFor="batch-declared-category">本次上传案例的申报类别</label><select id="batch-declared-category" value={batchDeclaredCategory} disabled={batchBusy} onChange={(event) => setBatchDeclaredCategory(Number(event.target.value))}><option value={0}>未知 · 按文档标题识别</option>{Object.entries(RUBRICS).map(([id, item]) => <option key={id} value={id}>{id}. {item.name}</option>)}</select><span>如果知道申报类别，请在上传前选择；这样才能识别错用其他类别模板的案例。此设置只影响之后上传的文件。</span></div>
         {batchProgress && <div className="notice batch-notice" role="status">{batchProgress}</div>}
-        {batchCases.length > 0 && <div className="notice batch-notice" role="status">第一步模板不符 {batchCases.filter((item) => item.template?.status === "不符合模板" && !item.templateOverride).length} 份；第二步已评分 {scoredCount} 份，其中低于 60 分 {batchCases.filter((item) => item.result?.total < 60).length} 份。当前筛出建议合计 {screenedCount} 份；300 份为统计目标，不改变评分线。</div>}
+        <div className="batch-category-setting"><label htmlFor="screen-percentage">评分阶段筛出比例</label><input id="screen-percentage" type="number" min="0" max="100" value={screenPercentage} onChange={(e) => setScreenPercentage(Math.min(100, Math.max(0, Number(e.target.value))))} /><span>% · 分数从低到高排名，同分分界待人工确认。</span><label htmlFor="request-interval">请求间隔</label><input id="request-interval" type="number" min="5" max="120" value={requestInterval} disabled={batchBusy} onChange={(e) => setRequestInterval(Math.min(120, Math.max(5, Number(e.target.value))))} /><span>秒 · 逐份处理</span></div>
+        {batchCases.length > 0 && <div className="notice batch-notice" role="status">第一步模板不符 {failures.length} 份；第二步已评分 {scoredCount}/{ranking.eligible} 份，按 {screenPercentage}% 目标约筛 {ranking.target} 份，当前排名建议筛出 {ranking.excluded} 份。{ranking.tied ? "分界同分案例待人工确认。" : ""}{!ranking.complete ? "评分未全部完成，排名为暂定结果。" : ""}</div>}
         <section className="batch-panel panel">
-          <div className="batch-toolbar"><div><span className="panel-kicker">案例队列</span><h2>本批案例 <span className="count">{batchCases.length} 份</span></h2><p>上传后立即完成框架核对，导出模板不符名单无需 API。AI 评分另需配置模型；建议分批处理并及时导出。</p></div><div className="heading-actions"><button className="button quiet" disabled={!batchCases.length || batchBusy} onClick={() => setBatchCases([])}>清空列表</button><button className="button quiet" disabled={!batchCases.some((item) => item.template?.status === "不符合模板")} onClick={exportTemplateFailures}>导出模板不符名单</button><button className="button quiet" disabled={!batchCases.length} onClick={exportBatchExcel}>导出 Excel</button><button className="button ai-button" disabled={batchBusy || !batchCases.some((item) => item.text && !item.result && (item.template?.status === "符合模板" || item.templateOverride))} onClick={reviewBatch}>{batchBusy ? "正在 AI 评分…" : "开始 AI 评分"}</button></div></div>
-          {!batchCases.length ? <div className="empty-state"><h2>上传 DOCX 案例文档</h2><p>支持一次选择多份 Word 文档。正文将用于评分，不会保存在服务端。</p><button className="button primary" onClick={() => batchFileInput.current?.click()}>选择多个文件</button></div> : <div className="batch-list"><div className="batch-row batch-header"><span>案例文件</span><span>案例类别</span><span>状态</span><span>建议总分</span><span>操作</span></div>{batchCases.map((item) => <article className="batch-row" key={item.id}><div className="batch-name"><strong title={item.name}>{item.name}</strong>{item.error && <small>{item.error}</small>}{item.template && <small>模板：{item.template.status}{item.template.reasons.length ? ` · ${item.template.reasons.join("；")}` : ""}</small>}</div><select aria-label={`${item.name}案例类别`} value={item.category} disabled={batchBusy || Boolean(item.result)} onChange={(event) => setBatchCases((current) => current.map((entry) => { if (entry.id !== item.id) return entry; const nextCategory = Number(event.target.value); const template = checkTemplate(entry.text, nextCategory); return { ...entry, category: nextCategory, template, templateOverride: false, status: template.status === "符合模板" ? "待评分" : "待核对模板" }; }))}>{Object.entries(RUBRICS).map(([id, itemRubric]) => <option key={id} value={id}>{id}. {itemRubric.name}</option>)}</select><span className={`batch-status ${item.result ? "done" : item.status === "评审失败" || item.status === "读取失败" ? "error" : ""}`}>{item.status}</span><strong className="batch-score">{item.result ? `${item.result.total} / 100` : "—"}</strong><div className="batch-actions">{item.text && !item.result && item.template?.status !== "符合模板" && <button className="text-button" disabled={batchBusy} onClick={() => setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, templateOverride: !entry.templateOverride, status: entry.templateOverride ? "待核对模板" : "人工确认·待评分" } : entry))}>{item.templateOverride ? "撤销确认" : "人工确认继续"}</button>}{item.result && <button className="text-button" onClick={() => { setCategory(item.category); setDoc({ title: item.name.replace(/\.docx$/i, ""), fileName: item.name, text: item.text, sourceFile: item.sourceFile, demo: false }); setScores(Object.fromEntries(item.result.results.map((row) => [row.indicator, row.score]))); setAiReview({ ...item.result, byName: Object.fromEntries(item.result.results.map((row) => [row.indicator, row])), reviewedAt: "批量评审结果" }); setComment(item.result.overallComment || ""); setView("review"); }}>查看详情</button>}<button className="text-button remove-case" disabled={batchBusy} onClick={() => setBatchCases((current) => current.filter((entry) => entry.id !== item.id))}>移除</button></div></article>)}</div>}
+          <div className="batch-toolbar"><div><span className="panel-kicker">案例队列</span><h2>本批案例 <span className="count">{batchCases.length} 份</span></h2><p>上传后立即完成框架核对，导出模板不符名单无需 API。AI 评分另需配置模型；建议分批处理并及时导出。</p></div><div className="heading-actions"><button className="button quiet" disabled={!batchCases.length || batchBusy} onClick={() => setBatchCases([])}>清空列表</button><button className="button quiet" disabled={!failures.length} onClick={exportTemplateFailures}>导出模板不符名单</button><button className="button quiet" disabled={!batchCases.length} onClick={exportBatchExcel}>导出 Excel</button><button className="button quiet" disabled={!batchCases.length || reportBusy} onClick={exportBatchWord}>{reportBusy ? "生成报告…" : "导出完整Word报告"}</button>{batchBusy && !batchReading && <button className="button quiet" onClick={() => { stopBatch.current = true; setBatchProgress("将在当前案例处理完后暂停。"); }}>暂停评分</button>}<button className="button ai-button" disabled={busy || batchBusy || !batchCases.some((item) => item.text && !item.result && (item.template?.status === "符合模板" || item.templateOverride))} onClick={reviewBatch}>{batchBusy ? batchReading ? "正在读取…" : "正在 AI 评分…" : "开始 AI 评分"}</button></div></div>
+          {!batchCases.length ? <div className="empty-state"><h2>上传案例文档</h2><p>支持DOC、DOCX和有文字层的PDF；扫描PDF请先OCR。正文将用于评分，不会保存在服务端。</p><button className="button primary" onClick={() => batchFileInput.current?.click()}>选择多个文件</button></div> : <div className="batch-list"><div className="batch-row batch-header"><span>案例文件</span><span>案例类别</span><span>状态</span><span>建议总分</span><span>操作</span></div>{orderedCases.map((item) => <article className="batch-row" key={item.id}><div className="batch-name"><strong title={item.name}>{item.name}</strong>{item.error && <small>{item.error}</small>}{item.template && <small>模板：{effectiveTemplate(item)}{item.template.reasons.length ? ` · ${item.template.reasons.join("；")}` : ""}</small>}</div><select aria-label={`${item.name}案例类别`} value={item.category} disabled={batchBusy || Boolean(item.result)} onChange={(event) => setBatchCases((current) => current.map((entry) => { if (entry.id !== item.id) return entry; const nextCategory = Number(event.target.value); const template = checkTemplate(entry.text, nextCategory); return { ...entry, category: nextCategory, template, templateOverride: false, status: template.status === "符合模板" ? "待评分" : "待核对模板" }; }))}>{Object.entries(RUBRICS).map(([id, itemRubric]) => <option key={id} value={id}>{id}. {itemRubric.name}</option>)}</select><span className={`batch-status ${item.result ? "done" : item.status === "评审失败" || item.status === "读取失败" ? "error" : ""}`}>{item.result ? screeningDecision(item, ranking) : item.status}</span><strong className="batch-score">{item.result ? `${item.result.total} / 100` : "—"}</strong><div className="batch-actions">{item.text && item.template?.status !== "符合模板" && <button className="text-button" disabled={batchBusy} onClick={() => setBatchCases((current) => current.map((entry) => entry.id === item.id ? { ...entry, templateOverride: !entry.templateOverride, status: entry.result ? "评分完成·待复核" : entry.templateOverride ? "待核对模板" : "人工确认·待评分" } : entry))}>{item.templateOverride ? "撤销确认" : "人工确认继续"}</button>}{item.text && <button className="text-button" disabled={batchBusy} onClick={() => { setCategory(item.category); setDoc({ title: item.name.replace(/\.(docx?|pdf)$/i, ""), fileName: item.name, text: item.text, sourceFile: item.sourceFile, demo: false, batchId: item.id }); setSingleTemplateOverride(item.templateOverride); setScores(item.result ? Object.fromEntries(item.result.results.map((row) => [row.indicator, row.score])) : {}); setAiReview(item.result ? { ...item.result, byName: Object.fromEntries(item.result.results.map((row) => [row.indicator, row])), reviewedAt: "批量评审结果" } : null); setComment(item.result?.overallComment || ""); setView("review"); }}>查看详情</button>}<button className="text-button remove-case" disabled={batchBusy} onClick={() => setBatchCases((current) => current.filter((entry) => entry.id !== item.id))}>移除</button></div></article>)}</div>}
           {batchCases.length > 0 && <p className="batch-footnote">Excel 包含全部案例的模板核对、评分与初筛建议，以及已评分案例的逐项依据。筛出建议须人工复核。</p>}
         </section>
       </main>}
@@ -420,27 +434,27 @@ function App() {
       {view === "review" && <>
         <div className="page-heading">
           <div><p className="eyebrow">CASE REVIEW / 评审工作台</p><h1>案例初审与评分</h1><p className="subheading">依据大赛评审标准逐项查看材料与证据，形成可复核的评分记录。</p></div>
-          <div className="heading-actions"><button className="button quiet" onClick={() => fileInput.current?.click()}>更换案例文档</button><input ref={fileInput} type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden onChange={(e) => loadFile(e.target.files?.[0])} /></div>
+          <div className="heading-actions"><button className="button quiet" disabled={busy || batchBusy} onClick={() => fileInput.current?.click()}>更换案例文档</button><input ref={fileInput} type="file" accept=".doc,.docx,.pdf" hidden onChange={(e) => loadFile(e.target.files?.[0])} /></div>
         </div>
-        {templateResult && <div className="notice" role="status">第一步 · 模板核对：{templateResult.status}。{templateResult.reasons.length ? templateResult.reasons.join("；") : "已检出对应模板的主要栏目。"} 模板判断基于提取文字，需结合原始 Word 复核。</div>}
-        {(notice || busy) && <div className="notice" role="status">{busy ? "正在读取 DOCX 文档…" : notice}</div>}
+        {templateResult && <div className="notice" role="status">第一步 · 模板核对：{singleTemplateOverride ? "符合模板（人工确认）" : templateResult.status}。{templateResult.reasons.length ? templateResult.reasons.join("；") : "已检出对应模板的主要栏目。"} 模板判断基于提取文字，需结合原始 Word 复核。</div>}
+        {(notice || busy) && <div className="notice" role="status">{busy ? notice || "正在处理，请等待…" : notice}</div>}
         <div className="workspace">
           <section className="document-panel panel">
-            <div className="panel-head doc-head"><div><span className="panel-kicker">案例材料</span><h2 title={doc.title}>{doc.title}</h2><p className="file-meta">{doc.fileName} <span>·</span> {doc.demo ? "示例内容，非真实参赛案例" : `${doc.text.length.toLocaleString()} 字符已提取`}</p></div><button className="text-button" onClick={() => fileInput.current?.click()}>上传 DOCX</button></div>
-            <div className="doc-toolbar"><div className="doc-tabs"><button className={documentView === "document" ? "selected" : ""} onClick={() => setDocumentView("document")}>文字解析</button><button className={documentView === "word" ? "selected" : ""} onClick={() => setDocumentView("word")}>原始 Word</button><button className={documentView === "evidence" ? "selected" : ""} onClick={() => setDocumentView("evidence")}>证据定位</button></div><span className="doc-page">{documentView === "document" ? "正文文字视图" : documentView === "word" ? "原始页面预览" : `${rubric.rows.length} 项评审依据`}</span></div>
-            {documentView === "word" ? <OriginalWordPreview file={doc.sourceFile} /> : documentView === "document" ? <article className="document-body">
+            <div className="panel-head doc-head"><div><span className="panel-kicker">案例材料</span><h2 title={doc.title}>{doc.title}</h2><p className="file-meta">{doc.fileName} <span>·</span> {doc.demo ? "示例内容，非真实参赛案例" : `${doc.text.length.toLocaleString()} 字符已提取`}</p></div><button className="text-button" disabled={busy || batchBusy} onClick={() => fileInput.current?.click()}>上传文档</button></div>
+            <div className="doc-toolbar"><div className="doc-tabs"><button className={documentView === "document" ? "selected" : ""} onClick={() => setDocumentView("document")}>文字解析</button><button className={documentView === "word" ? "selected" : ""} onClick={() => setDocumentView("word")}>原始文档</button><button className={documentView === "evidence" ? "selected" : ""} onClick={() => setDocumentView("evidence")}>证据定位</button></div><span className="doc-page">{documentView === "document" ? "正文文字视图" : documentView === "word" ? "原始页面预览" : `${rubric.rows.length} 项评审依据`}</span></div>
+            {documentView === "word" ? <OriginalDocumentPreview file={doc.sourceFile} /> : documentView === "document" ? <article className="document-body">
               {doc.text.split(/\n+/).filter(Boolean).map((paragraph, index) => {
                 const heading = /^(一、|二、|三、|四、|五、|\d+[.、])/.test(paragraph);
                 return heading ? <h3 key={index}>{paragraph}</h3> : <p key={index}>{paragraph}</p>;
               })}
             </article> : <div className="evidence-list">{rubric.rows.map((row, index) => <article className="evidence-item" key={row.name}><div><span>0{index + 1} · {row.name}</span><p>{makeEvidence(doc.text, row, doc.demo)}</p></div><small>{doc.demo ? "示例文本定位" : "关键词辅助定位"}</small></article>)}</div>}
-            <div className="doc-foot"><span>{documentView === "word" ? "原始 DOCX 页面预览" : "DOCX 正文解析"}</span><span>{documentView === "word" ? "仅在当前浏览器渲染，预览版式可能与 Word 略有差异" : "图片、视频与版式内容需人工检查"}</span></div>
+            <div className="doc-foot"><span>{documentView === "word" ? "原始文档预览" : "文档正文解析"}</span><span>{documentView === "word" ? "DOCX和PDF在浏览器预览；旧版DOC需下载核对" : "图片、视频与版式内容需人工检查"}</span></div>
           </section>
 
           <section className="review-panel panel">
             <div className="review-title"><div><span className="panel-kicker">评审与打分</span><h2>选择案例类别</h2></div><span className="review-state">初审建议 · 人工复核</span></div>
             <div className="category-grid" role="group" aria-label="选择案例类别">
-              {Object.entries(RUBRICS).map(([id, item]) => <button key={id} className={`category-option ${Number(id) === category ? "chosen" : ""}`} onClick={() => switchCategory(Number(id))} aria-pressed={Number(id) === category}><span className="category-no">0{id}</span><strong>{item.short}</strong><small>{item.name}</small></button>)}
+              {Object.entries(RUBRICS).map(([id, item]) => <button key={id} className={`category-option ${Number(id) === category ? "chosen" : ""}`} onClick={() => switchCategory(Number(id))} disabled={busy || batchBusy} aria-pressed={Number(id) === category}><span className="category-no">0{id}</span><strong>{item.short}</strong><small>{item.name}</small></button>)}
             </div>
             <div className="category-note"><strong>当前标准</strong><span>{rubric.name} · {rubric.rows.map((row) => `${row.name} ${row.weight}%`).join(" / ")}</span></div>
             <div className="rubric-caption"><div><span className="panel-kicker">评分指标与依据</span><p>{rubric.intro}</p></div><span className="weights-total">权重合计 <b>{rubric.rows.reduce((s, row) => s + row.weight, 0)}%</b></span></div>
@@ -460,16 +474,16 @@ function App() {
             <div className="model-note"><b>{aiReview ? "AI初审已完成" : "初审与数据说明"}</b><span>{aiReview ? `${aiReview.model} · ${aiReview.reviewedAt}。建议分、理由与引用均需对照案例原文复核。` : "使用你配置的模型生成建议分。评分会消耗服务商额度；案例正文将在你确认后发送至所选 API 地址。"}</span></div>
             <label className="comment-label" htmlFor="review-comment">综合评语 <span>选填</span></label>
             <textarea id="review-comment" value={comment} onChange={(e) => setComment(e.target.value)} placeholder="记录整体判断、需要补充的材料或复核意见…" rows="2" />
-            <div className="score-footer"><div className="total-score"><span>当前总分</span><b>{assigned ? total : "—"}<small>/ 100</small></b><em>{assigned}/{rubric.rows.length} 项已填写</em></div><div className="footer-actions"><button className="button ai-button" disabled={busy} onClick={() => apiKey && apiUrl && model ? setConsentOpen(true) : setKeyDialogOpen(true)}>{busy ? "AI 正在初审…" : "AI 初审"}</button><button className="button quiet" onClick={saveReview}>保存草稿</button><button className="button primary" onClick={exportReview}>导出评审记录</button></div></div>
+            <div className="score-footer"><div className="total-score"><span>当前总分</span><b>{assigned ? total : "—"}<small>/ 100</small></b><em>{assigned}/{rubric.rows.length} 项已填写</em></div><div className="footer-actions"><button className="button ai-button" disabled={busy || batchBusy} onClick={() => apiKey && apiUrl && model ? setConsentOpen(true) : setKeyDialogOpen(true)}>{busy ? "AI 正在初审…" : "AI 初审"}</button><button className="button quiet" onClick={saveReview}>保存草稿</button><button className="button primary" onClick={exportReview}>导出评审记录</button></div></div>
           </section>
         </div>
         <footer className="page-footer"><span>评审建议用于辅助核对；最终意见由评审专家确认。</span><span>华东师范大学 · 第四届中小学教师AI创新教学案例大赛</span></footer>
       </>}
 
-      {keyDialogOpen && <div className="consent-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setKeyDialogOpen(false); }}><section className="consent-dialog key-dialog" role="dialog" aria-modal="true" aria-labelledby="key-title"><span className="panel-kicker">MODEL CONNECTION / 模型连接</span><h2 id="key-title">配置模型 API</h2><p>支持兼容 OpenAI Chat Completions 格式的模型服务。输入服务商提供的完整 HTTPS 接口地址、模型名称和 API Key。配置仅保存在当前浏览器会话；评分时通过本系统服务端转发至所选 API 地址。</p><label className="comment-label" htmlFor="api-url-input">API 地址</label><input id="api-url-input" className="api-key-input" type="url" autoComplete="url" spellCheck="false" value={apiUrlDraft} onChange={(event) => { setApiUrlDraft(event.target.value); setKeyConnected(false); setKeyStatus(""); }} placeholder="https://api.example.com/v1/chat/completions" /><label className="comment-label api-field-label" htmlFor="model-input">模型名称</label><input id="model-input" className="api-key-input" type="text" autoComplete="off" spellCheck="false" value={modelDraft} onChange={(event) => { setModelDraft(event.target.value); setKeyConnected(false); setKeyStatus(""); }} placeholder="填写服务商提供的 model ID" /><label className="comment-label api-field-label" htmlFor="api-key-input">API Key</label><input id="api-key-input" className="api-key-input" type="password" autoComplete="off" spellCheck="false" value={keyDraft} onChange={(event) => { setKeyDraft(event.target.value); setKeyConnected(false); setKeyStatus(""); }} placeholder="粘贴你的 API Key" /><div className={`key-status ${keyConnected ? "success" : ""}`} role="status">{keyStatus || (apiKey ? `已保存模型配置：${model}（Key 不显示）。` : "尚未配置模型 API。")}</div><p className="key-cost-note">连接测试会发送一次极短请求并产生少量模型用量。系统仅接受公开 HTTPS 服务地址，禁止本机及内部网络地址。不要在公共或共享电脑上保存个人 Key。</p><div className="consent-actions key-actions">{apiKey && <button className="button quiet" onClick={clearApiKey}>清除</button>}<button className="button quiet" onClick={() => setKeyDialogOpen(false)}>关闭</button><button className="button primary" disabled={keyTesting} onClick={testAndSaveKey}>{keyTesting ? "正在测试…" : "测试连接并保存"}</button></div></section></div>}
+      {keyDialogOpen && <div className="consent-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setKeyDialogOpen(false); }}><section className="consent-dialog key-dialog" role="dialog" aria-modal="true" aria-labelledby="key-title"><span className="panel-kicker">MODEL CONNECTION / 模型连接</span><h2 id="key-title">配置模型 API</h2><p>支持OpenAI兼容的Chat Completions和Responses接口，按地址自动识别。输入服务商提供的完整 HTTPS 接口地址、模型名称和 API Key。配置仅保存在当前浏览器会话；评分时通过本系统服务端转发至所选 API 地址。</p><label className="comment-label" htmlFor="api-url-input">API 地址（/chat/completions 或 /responses）</label><input id="api-url-input" className="api-key-input" type="url" autoComplete="url" spellCheck="false" value={apiUrlDraft} onChange={(event) => { setApiUrlDraft(event.target.value); setAvailableModels([]); setKeyConnected(false); setKeyStatus(""); }} placeholder="https://api.example.com/v1/chat/completions" /><button className="button quiet model-fetch" disabled={modelLoading || keyTesting} onClick={fetchModels}>{modelLoading ? "获取中…" : "自动获取可用模型"}</button>{availableModels.length > 0 && <select className="api-key-input" aria-label="选择可用模型" value={availableModels.includes(modelDraft) ? modelDraft : ""} onChange={(e) => { setModelDraft(e.target.value); setKeyConnected(false); }}><option value="">请选择模型</option>{availableModels.map((id) => <option key={id} value={id}>{id}</option>)}</select>}<label className="comment-label api-field-label" htmlFor="model-input">模型名称</label><input id="model-input" className="api-key-input" type="text" autoComplete="off" spellCheck="false" value={modelDraft} onChange={(event) => { setModelDraft(event.target.value); setKeyConnected(false); setKeyStatus(""); }} placeholder="填写服务商提供的 model ID" /><label className="comment-label api-field-label" htmlFor="api-key-input">API Key</label><input id="api-key-input" className="api-key-input" type="password" autoComplete="off" spellCheck="false" value={keyDraft} onChange={(event) => { setKeyDraft(event.target.value); setAvailableModels([]); setKeyConnected(false); setKeyStatus(""); }} placeholder="粘贴你的 API Key" /><label className="comment-label api-field-label" htmlFor="output-budget">最大输出预算（含推理用量）</label><input id="output-budget" className="api-key-input" type="number" min="1024" max="32768" step="1024" value={maxOutputTokens} onChange={(e) => setMaxOutputTokens(Number(e.target.value))} /><div className={`key-status ${keyConnected ? "success" : ""}`} role="status">{keyStatus || (apiKey ? `已保存模型配置：${model}（Key 不显示）。` : "尚未配置模型 API。")}</div><p className="key-cost-note">模型列表由服务商接口提供，不支持时可手动填写。连接测试及自动重试会消耗模型额度；评分截断时最多增加预算重试一次。系统仅接受公开 HTTPS 服务地址，禁止本机及内部网络地址。不要在公共或共享电脑上保存个人 Key。</p><div className="consent-actions key-actions">{apiKey && <button className="button quiet" onClick={clearApiKey}>清除</button>}<button className="button quiet" onClick={() => setKeyDialogOpen(false)}>关闭</button><button className="button primary" disabled={keyTesting} onClick={testAndSaveKey}>{keyTesting ? "正在测试…" : "测试连接并保存"}</button></div></section></div>}
       {consentOpen && <div className="consent-overlay" role="presentation"><section className="consent-dialog" role="dialog" aria-modal="true" aria-labelledby="consent-title"><span className="panel-kicker">MODEL REVIEW / AI 初审</span><h2 id="consent-title">开始 AI 初审？</h2><p>系统将把当前案例正文、所选类别和对应评分要点发送到你配置的模型服务，生成逐项评分建议、理由及原文引用。</p><p>模型调用会消耗你的服务商额度。AI 建议仅供参考，最终评分由评审员确认。</p><div className="consent-case"><span>案例</span><strong>{doc.title}</strong><span>类别</span><strong>{rubric.name}</strong></div><div className="consent-actions"><button className="button quiet" onClick={() => setConsentOpen(false)}>取消</button><button className="button primary" onClick={runAIReview}>确认发送并初审</button></div></section></div>}
 
-      {view === "standards" && <main className="secondary-view"><div className="page-heading"><div><p className="eyebrow">RUBRIC / 评审依据</p><h1>四类案例评分标准</h1><p className="subheading">各项指标说明依据三份评审标准文档整理，AI 初审与人工评审使用同一套要点。</p></div><button className="button primary" onClick={() => setView("review")}>返回评审</button></div><div className="standards-grid">{Object.entries(RUBRICS).map(([id, item]) => <section className="standard-card panel" key={id}><div className="standard-top"><span>类别 0{id}</span><strong>{item.rows.reduce((s, row) => s + row.weight, 0)}<small>%</small></strong></div><h2>{item.name}</h2><p>{item.intro}</p>{item.rows.map((row) => <section className="standard-row" key={row.name}><div className="standard-row-heading"><strong>{row.name}</strong><b>{row.weight}%</b></div><ol>{row.points.map((point) => <li key={point}>{point}</li>)}</ol></section>)}</section>)}</div></main>}
+      {view === "standards" && <main className="secondary-view"><div className="page-heading"><div><p className="eyebrow">RUBRIC / 评审依据</p><h1>四类案例评分标准</h1><p className="subheading">各项指标依据2026年10月7日提供的新版三份评审标准文档，AI 初审与人工评审使用同一套要点。</p></div><button className="button primary" onClick={() => setView("review")}>返回评审</button></div><div className="standards-grid">{Object.entries(RUBRICS).map(([id, item]) => <section className="standard-card panel" key={id}><div className="standard-top"><span>类别 0{id}</span><strong>{item.rows.reduce((s, row) => s + row.weight, 0)}<small>%</small></strong></div><h2>{item.name}</h2><p>{item.intro}</p>{item.rows.map((row) => <section className="standard-row" key={row.name}><div className="standard-row-heading"><strong>{row.name}</strong><b>{row.weight}%</b></div><ol>{row.points.map((point) => <li key={point}>{point}</li>)}</ol></section>)}</section>)}</div></main>}
 
       {view === "history" && <main className="secondary-view"><div className="page-heading"><div><p className="eyebrow">REVIEW LOG / 本地会话</p><h1>评审记录</h1><p className="subheading">当前原型仅在本次页面会话中保留草稿，不会上传或持久化保存。</p></div><button className="button quiet" onClick={() => setView("review")}>返回评审</button></div><section className="history-panel panel">{history.length === 0 ? <div className="empty-state"><h2>还没有保存的评审草稿</h2><p>在评审工作台保存后，记录会显示在这里。</p><button className="button primary" onClick={() => setView("review")}>开始评审</button></div> : history.map((item, index) => <article className="history-item" key={`${item.savedAt}-${index}`}><div><strong>{item.title}</strong><p>{item.category} · {item.fileName} · {item.savedAt} · {item.filledCount}/{item.rowCount} 项已填写</p></div><b>{item.filledCount ? item.total : "—"}<small> / 100</small></b></article>)}</section></main>}
     </div>

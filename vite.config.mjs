@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { scoreCase, testApiKey, ScoreApiError } from "./api/score.mjs";
+import { scoreCase, testApiKey, listModels, ScoreApiError } from "./api/score.mjs";
 
 function localScoringApi() {
   return {
@@ -13,20 +13,20 @@ function localScoringApi() {
           res.end(JSON.stringify({ acceptsUserApiKey: true, modelSelection: "user-configured", keyMode: "user-provided" }));
           return;
         }
-        if (pathname !== "/api/score" && pathname !== "/api/test-key") return next();
+        if (pathname !== "/api/score" && pathname !== "/api/test-key" && pathname !== "/api/models") return next();
         if (req.method !== "POST") {
           res.writeHead(405, { "Cache-Control": "no-store" }); res.end(); return;
         }
         try {
           const body = await readJsonBody(req);
           const apiKey = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "")?.[1] || "";
-          const result = pathname === "/api/test-key" ? await testApiKey({ ...body, apiKey }) : await scoreCase({ ...body, apiKey });
+          const result = pathname === "/api/models" ? await listModels({ ...body, apiKey }) : pathname === "/api/test-key" ? await testApiKey({ ...body, apiKey }) : await scoreCase({ ...body, apiKey });
           res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
           res.end(JSON.stringify(result));
         } catch (error) {
           const status = error instanceof ScoreApiError ? error.status : 400;
           res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ error: error instanceof ScoreApiError ? error.message : "请求内容格式无效。" }));
+          res.end(JSON.stringify({ error: error instanceof ScoreApiError ? error.message : "请求内容格式无效。", kind: error.kind, retryable: Boolean(error.retryable), retryAfter: error.retryAfter }));
         }
       });
     },
@@ -55,6 +55,7 @@ export default defineConfig(() => ({
     optimizeDeps: { include: ["react", "react-dom/client"] },
     server: {
       host: "0.0.0.0",
+      watch: { ignored: ["**/.qa/**"] },
       allowedHosts: ["terminal.local"],
       warmup: { clientFiles: ["./src/main.jsx"] },
     },
