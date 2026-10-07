@@ -1,11 +1,13 @@
 import { extractBinaryDoc } from "./docBinary.js";
 import { textInReadingOrder } from "./pdfText.js";
+import { createPdfOcr, needsOcr } from "./pdfOcr.js";
 
 export const supportedFile = (file) => /\.(docx?|pdf)$/i.test(file.name);
-export async function readDocument(file, readDocx) {
+export async function readDocument(file, readDocx, options = {}) {
   if (file.size > 80 * 1024 * 1024) throw new Error("文档超过80MB，请压缩或拆分附件后上传。");
   const extension = file.name.split(".").pop().toLowerCase();
   let text;
+  const metadata = { ocrPages: [], blankPages: [], warnings: [], pageCount: null };
   if (extension === "docx") text = await readDocx(file);
   else if (extension === "doc") {
     const buffer = await file.arrayBuffer(), bytes = new Uint8Array(buffer);
@@ -28,19 +30,33 @@ export async function readDocument(file, readDocx) {
     const loadingTask = pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false });
     const pdf = await loadingTask.promise;
     const pages = [];
-    let emptyPages = 0;
+    metadata.pageCount = pdf.numPages;
+    const ocr = await createPdfOcr(options.onProgress);
     try {
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i), content = await page.getTextContent();
-        const pageText = textInReadingOrder(content.items);
-        if (pageText.replace(/\s/g, "").length < 10) emptyPages++;
+        options.onProgress?.(`正在读取PDF第${i}/${pdf.numPages}页…`);
+        let pageText = textInReadingOrder(content.items);
+        const operations = await page.getOperatorList();
+        const hasImage = operations.fnArray.some((op) => [pdfjs.OPS.paintImageXObject, pdfjs.OPS.paintInlineImageXObject, pdfjs.OPS.paintImageMaskXObject].includes(op));
+        if (needsOcr(pageText, hasImage, options.pdfOcrMode)) {
+          const recognized = await ocr.recognize(page, i);
+          if (recognized.blank) metadata.blankPages.push(i);
+          else {
+            metadata.ocrPages.push({ page: i, confidence: recognized.confidence });
+            metadata.warnings.push(...recognized.warnings);
+          }
+          // OCR supersedes the short text layer (often only watermarks or page numbers).
+          if (recognized.text) pageText = recognized.text;
+        }
         pages.push(pageText);
+        page.cleanup();
       }
-    } finally { await loadingTask.destroy(); }
-    if (emptyPages) throw new Error(`PDF有${emptyPages}页无可读取文字，可能含扫描页。请先OCR或上传Word，避免漏评。`);
+    } finally { await ocr.close(); await loadingTask.destroy(); options.onMetadata?.(metadata); }
     text = pages.join("\n\n");
   } else throw new Error("请上传DOC、DOCX或PDF。");
   text = String(text || "").replace(/\u0000/g, "").trim();
-  if (!text) throw new Error("文档未读出正文，请检查加密、扫描页或文件损坏。");
+  options.onMetadata?.(metadata);
+  if (!text) throw new Error("未识别出有效正文，请查看原始文档核对扫描清晰度、空白页或密码保护。");
   return text;
 }

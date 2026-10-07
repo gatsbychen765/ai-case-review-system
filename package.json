@@ -17,9 +17,11 @@
     "cfb": "^1.2.2",
     "docx": "^9.9.0",
     "docx-preview": "^0.4.1",
+    "jszip": "^3.10.2",
     "pdfjs-dist": "^6.4.299",
     "react": "19.2.0",
     "react-dom": "19.2.0",
+    "tesseract.js": "^7.0.0",
     "vite": "6.4.2"
   },
   "allowScripts": {

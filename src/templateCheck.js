@@ -17,7 +17,7 @@ export function suggestCategory(text) {
   return 1;
 }
 
-export function checkTemplate(text, category) {
+export function checkTemplate(text, category, metadata) {
   const template = TEMPLATES[category];
   const source = String(text || "");
   const compact = source.replace(/\s/g, "");
@@ -29,6 +29,7 @@ export function checkTemplate(text, category) {
   if (!head.includes(template.title)) reasons.push(`未见模板标题“${template.title}”`);
   if (missing.length) reasons.push(`未见栏目：${missing.join("、")}`);
   if (source.length < 500) reasons.push("提取的正文不足 500 字，可能是空白模板或材料不完整");
+  if (metadata?.warnings?.length) reasons.push(...metadata.warnings);
   const status = otherTitle || missing.length >= 2 || source.length < 200 ? "不符合模板" : reasons.length ? "待人工核对" : "符合模板";
   return { status, reasons, template: template.title };
 }
